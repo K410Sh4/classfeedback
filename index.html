@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="pt" translate="no">
+
+<head>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Encode+Sans:wdth,wght@115.9,416&family=Playwrite+US+Trad+Guides&family=Satisfy&display=swap"
+        rel="stylesheet">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/assets/images/icon.png" type="image/png">
+    <link rel="stylesheet" href="/assets/css/index.css">
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <title>ClassInsingth</title>
+</head>
+
+<body>
+    <header class="h-wrapper">
+        <section class="h-frame">
+            <div class="h-left h-content">
+                <div class="h-tittle">
+                    <h1 class="tittle">
+                        Class Insight
+                    </h1>
+                </div>
+            </div>
+            <div class="h-right h-content">
+                <ul class="h-frame-option">
+                    <li class="option">Home</li>
+                    <li class="option">Feedback</li>
+                </ul>
+            </div>
+        </section>
+    </header>
+    <main class="m-wrapper">
+        <section class="m-frame">
+            <div class="lg-frame">
+                <div class="lg-content lg-top">
+                    <img src="/assets/images/googleico.png" alt="" class="ico">
+                    <h1 class="lg-tittle">
+                        Login
+                    </h1>
+                </div>
+                <div class="lg-content lg-middle">
+                    <ul class="lg-i">
+                        <li class="lg-i-email">
+                            <input type="email" name="email" id="email" placeholder="Email">
+                        </li>
+                        <li class="lg-i-pass">
+                            <input type="password" id="senha" placeholder="Digite sua senha">
+                            <button type="button" onclick="mostrarSenha()"><img src="/assets/images/eyesico.png" alt=""
+                                    class="ico"></button>
+                        </li>
+                    </ul>
+                </div>
+                <div class="lg-content lg-bottom">
+                    <p id="erro-login"></p>
+                    <p id="sucesso-login"></p>
+                    <button id="btn-login" class="lg-submit">Enviar</button>
+                    <div class="google-wrapper">
+                    <div id="googleSignInButton"></div>
+                </div>
+                </div>
+            </div>
+            <div class="vs-elements-frame">
+                <img src="/assets/images/feedel.png" alt="" class="vs-element-main">
+            </div>
+        </section>
+    </main>
+    <footer class="f-wrapper">
+        <div class="f-frame">
+            <div class="f-content f-left">
+                <div class="sb-frame">
+                    <h1>Contato</h1>
+                    <ul>
+                        <li class="sb-option"><img src="/assets/images/ytico.png" alt="" class="ico">
+                            <h2>Youtube</h2>
+                        </li>
+                        <li class="sb-option"><img src="/assets/images/instaico.png" alt="" class="ico">
+                            <h2>Instagram</h2>
+                        </li>
+                        <li class="sb-option"><img src="/assets/images/fcico.png" alt="" class="ico">
+                            <h2>Facebook</h2>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            <div class="f-content f-right">
+
+            </div>
+        </div>
+    </footer>
+</body>
+<script src="/assets/js/index.js"></script>
+<script src="/assets/js/google-verify.js"></script>
+<script src="/assets/js/salvar-login.js"></script>
+</html>
