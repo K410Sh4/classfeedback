@@ -14,7 +14,7 @@ async function handleGoogleCredentialResponse(response) {
 
       console.log("Login bem-sucedido:", data.user);
       // redireciona após login
-      window.location.href = "/assets/pages/pageMain.html"; 
+      window.location.href = "pageMain.html"; 
     } else {
       console.error("Erro no login com Google:", data.message);
     }
@@ -39,5 +39,5 @@ window.addEventListener("DOMContentLoaded", () => {
 function logout() {
     localStorage.removeItem("user");
     localStorage.removeItem("token");
-    window.location.href = "/"; // volta para a página de login
+    window.location.href = "/assets/pages/login.html"; // volta para a página de login
 }

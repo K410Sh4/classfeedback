@@ -90,7 +90,7 @@ body * {
     border-radius: 0.4rem;
     box-shadow: white 0.1vw 0.1vw;
     font-size: 90%;
-    padding: 2% 4%;
+    padding: 0.5vw 1vw;
 }
 
 .option:hover {
@@ -171,8 +171,8 @@ body * {
 .lg-i input:focus {
     border-color: #00bfff;
     box-shadow: 0 0 8px rgba(0, 191, 255, 0.5);
-}
 
+}
 .lg-i li {
     color: black;
     margin: 1vw 0vw;

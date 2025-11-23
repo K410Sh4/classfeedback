@@ -9,5 +9,5 @@ if(user) {
 function logout() {
   localStorage.removeItem("user");
   localStorage.removeItem("token");
-  window.location.href = "/"; // volta para página de login
+  window.location.href = "/assets/pages/login.html"; // volta para página de login
 }

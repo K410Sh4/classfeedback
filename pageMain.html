@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="pt">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/ScrollTrigger.min.js"></script>
+
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <title>ClassInsingth</title>
+</head>
+
+<body>
+    <header class="h-wrapper">
+        <section class="h-frame">
+            <div class="h-left h-content">
+                <div class="h-tittle">
+                    <h1 class="tittle">Class Insight</h1>
+                </div>
+            </div>
+            <div class="h-right h-content user-info">
+                <div class="user-details">
+                    <img id="userFoto" src="/assets/images/googleico.png" alt="Foto do usuário" class="user-photo">
+                    <span id="userNome">Convidado</span>
+                    <button onclick="logout()" class="logout-btn">Sair</button>
+                </div>
+            </div>
+        </section>
+        <main class="m-wrapper">
+            <section class="m-hero">
+                <div class="m-content m-t">
+                    <h2 class="hero-title">A sua opinião faz toda a </h2>
+                    <h1 class="hero-subtitle">Diferença</h1>
+                    <a href="" class="fd-btn-ar"><button class="fd-btn">Começar</button></a>
+                </div>
+                <div class="m-content m-inct">
+                    <div class="m-content m-inct-title">
+                        <h1>Benefícios do Feedback Escolar</h1>
+                    </div>
+                    <div class="sptr"></div>
+                    <div class="m-content m-m">
+                        <div class="m-m-card" data-id="1">
+                            <div class="card-part card-l">
+                                <div class="card-title">
+                                    <h1>Facilita a comunicação</h1>
+                                </div>
+                                <div class="sptr"></div>
+                                <div class="card-img">
+                                    <img src="/assets/images/card/comnct.png" alt="" class="card-img-item">
+                                </div>
+                            </div>
+                            <div class="card-part card-r">
+                                <div class="card-dscpt">
+                                    <h1>
+                                        Envie suas opiniões e sugestões de forma rápida e prática, sem complicações.
+                                    </h1>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="m-m-card" data-id="2">
+                            <div class="card-part card-l">
+                                <div class="card-title">
+                                    <h1>Confidencialidade garantida</h1>
+                                </div>
+                                <div class="sptr"></div>
+                                <div class="card-img">
+                                    <img src="/assets/images/card/cnfdcl.png" alt="" class="card-img-item">
+                                </div>
+                            </div>
+                            <div class="card-part card-r">
+                                <div class="card-dscpt">
+                                    <h1>
+                                        Todos os feedbacks são anônimos e protegidos, garantindo sua privacidade.
+                                    </h1>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="m-m-card" data-id="3">
+                            <div class="card-part card-l">
+                                <div class="card-title">
+                                    <h1>Resultados visíveis</h1>
+                                </div>
+                                <div class="sptr"></div>
+                                <div class="card-img">
+                                    <img src="/assets/images/card/results.png" alt="" class="card-img-item">
+                                </div>
+                            </div>
+                            <div class="card-part card-r">
+                                <div class="card-dscpt">
+                                    <h1>
+                                        Acompanhe como suas sugestões ajudam a melhorar a escola e as atividades
+                                        diárias.
+                                    </h1>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="m-cotent m-b">
+
+
+                    </div>
+                </div>
+            </section>
+        </main>
+        <footer class="f-wrapper">
+            <div class="title-steps">
+                <h1>Feedback passo a passo</h1>
+            </div>
+            <section class="scroll-horizontal">
+                <div class="painel">
+                    <div class="slide s1">
+                        <div class="sl-t">
+                            <h1 class="sl-title"> Coleta</h1>
+                            <h2 class="sl-dsc">Compartilhe sua opinião</h2>
+                        </div>
+                        <div class="sl-m">
+                            <div class="sl-m-l sl-m-c">
+                                <video src="/assets/gif/coleta.mp4" autoplay class="video" loop></video>
+                            </div>
+                            <div class="sl-m-r sl-m-c">
+                                <ul class="explain">
+                                    <li class="li-1">
+                                        <h1>O usuário envia suas ideias, sugestões ou críticas através do formulário.
+                                        </h1>
+                                    </li>
+                                    <li class="li-2">
+                                        <h1>Tudo é registrado de forma anônima e segura.</h1>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="sl-f">
+
+                        </div>
+                    </div>
+                    <div class="slide s2">
+                        <div class="sl-t">
+                            <h1 class="sl-title"> Registro</h1>
+                            <h2 class="sl-dsc">Armazenamento seguro</h2>
+                        </div>
+                        <div class="anim"><img src="/assets/images/slide-content/pipa.png" alt=""></div>
+                        <div class="sl-m">
+                            <div class="sl-m-l sl-m-c">
+                                <video src="/assets/gif/registro.mp4" autoplay class="video" loop></video>
+                            </div>
+                            <div class="sl-m-r sl-m-c">
+                                <ul class="explain">
+                                    <li class="li-1">
+                                        <h1>As informações são armazenadas em um banco de dados protegido
+                                        </h1>
+                                    </li>
+                                    <li class="li-2">
+                                        <h1>Nenhum dado pessoal é necessário, garantindo confidencialidade.</h1>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="sl-f">
+
+                        </div>
+                    </div>
+                    <div class="slide s3">
+                        <div class="sl-t">
+                            <h1 class="sl-title"> Análise</h1>
+                            <h2 class="sl-dsc">Avaliação das sugestões</h2>
+                        </div>
+                        <div class="sl-m">
+                            <div class="sl-m-l sl-m-c">
+                                <video src="/assets/gif/analise.mp4" autoplay class="video" loop></video>
+                            </div>
+                            <div class="sl-m-r sl-m-c">
+                                <ul class="explain">
+                                    <li class="li-1">
+                                        <h1>A equipe revisa o feedback recebido.
+                                        </h1>
+                                    </li>
+                                    <li class="li-2">
+                                        <h1>Prioriza melhorias com base na frequência e relevância das opiniões.</h1>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="sl-f">
+
+                        </div>
+                    </div>
+                    <div class="slide s4">
+                        <div class="sl-t">
+                            <h1 class="sl-title">Resultado</h1>
+                            <h2 class="sl-dsc">Melhorias aplicadas</h2>
+                        </div>
+                        <div class="sl-m">
+                            <div class="sl-m-l sl-m-c">
+                                <video src="/assets/gif/resultados.mp4" autoplay class="video" loop></video>
+                            </div>
+                            <div class="sl-m-r sl-m-c">
+                                <ul class="explain">
+                                    <li class="li-1">
+                                        <h1>As mudanças sugeridas são implementadas.
+                                        </h1>
+                                    </li>
+                                    <li class="li-2">
+                                        <h1>O usuário pode ver que sua opinião contribuiu para aprimorar o serviço.</h1>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="sl-f">
+
+                        </div>
+                    </div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill"></div>
+                </div>
+
+            </section>
+
+            <section class="final-content">
+                <h2 class="final-title">Participe também</h2>
+                <p class="final-desc">Você está a 1 clique de distancia de poder tornar o ambiente escolar um lugar
+                    melhor!!</p> <a href="" class="fd-btn-ar"><button class="fd-btn">Começar</button></a>
+            </section>
+
+        </footer>
+    </header>
+    <script src="/assets/js/salvar-login.js"></script>
+    <script src="/assets/js/rolagemlatera.js"></script>
+    <script src="/assets/js/destaques.js"></script>
+</body>
+
+</html>
