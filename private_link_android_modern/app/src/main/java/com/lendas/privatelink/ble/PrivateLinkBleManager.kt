@@ -76,6 +76,8 @@ class PrivateLinkBleManager(
     private var privateKey: ByteArray? = null
     private var sessionKey: ByteArray? = null
     private var nodeId: String? = null
+    private var legacySession = false
+    private var migrationRequested = false
     private var authGeneration = 0
     private var awaitingBond = false
     private var bondGeneration = 0
@@ -125,6 +127,8 @@ class PrivateLinkBleManager(
         privateKey = key
         sessionKey = null
         nodeId = null
+        legacySession = false
+        migrationRequested = false
     }
 
     fun currentSessionKey(): ByteArray? =
@@ -625,6 +629,8 @@ class PrivateLinkBleManager(
             }
 
             message.startsWith("HELLO2|") -> {
+                legacySession = false
+                migrationRequested = false
                 val masterKey = privateKey ?: return
                 val parts = message.split("|")
 
@@ -662,6 +668,8 @@ class PrivateLinkBleManager(
             }
 
             message.startsWith("HELLO|") -> {
+                legacySession = true
+                migrationRequested = false
                 val key = privateKey ?: return
                 sessionKey = key
                 val nonceText = message.substringAfter("HELLO|").trim()
@@ -711,7 +719,48 @@ class PrivateLinkBleManager(
             }
 
             message.startsWith("INFO|") -> {
-                listener.onNodeInfo(parseNodeInfo(message))
+                val info = parseNodeInfo(message)
+                listener.onNodeInfo(info)
+                maybeMigrateLegacyKey(info)
+            }
+
+            message.startsWith("KEY_MIGRATE_OK|") -> {
+                val migratedNodeId =
+                    message.substringAfter("KEY_MIGRATE_OK|").trim()
+
+                if (migratedNodeId.isNotBlank()) {
+                    nodeId = migratedNodeId
+                }
+
+                legacySession = false
+                migrationRequested = false
+
+                val masterKey = privateKey
+                val id = nodeId
+
+                if (
+                    masterKey != null &&
+                    !id.isNullOrBlank()
+                ) {
+                    sessionKey =
+                        Crypto.deriveNodeKey(
+                            masterKey,
+                            id
+                        )
+                }
+
+                log(
+                    "Chave legada migrada para credencial independente do nó."
+                )
+                listener.onLinkState(
+                    LinkState.Authenticating,
+                    "Credencial do nó atualizada • reautenticando..."
+                )
+            }
+
+            message.startsWith("KEY_MIGRATE_ERROR|") -> {
+                migrationRequested = false
+                log(message)
             }
 
             message.startsWith("FAST_OTA_READY|") && awaitingFastOta -> {
@@ -791,6 +840,39 @@ class PrivateLinkBleManager(
                 failOta(message.substringAfter("OTA_ERROR|"))
             }
         }
+    }
+
+    private fun maybeMigrateLegacyKey(
+        info: NodeInfo
+    ) {
+        if (
+            !legacySession ||
+            migrationRequested ||
+            !authenticated
+        ) {
+            return
+        }
+
+        val masterKey = privateKey ?: return
+        val id = info.nodeId ?: nodeId ?: return
+
+        val derived =
+            Crypto.deriveNodeKey(
+                masterKey,
+                id
+            )
+
+        migrationRequested = true
+
+        enqueueText(
+            controlChar,
+            "KEY_MIGRATE|" +
+                Crypto.bytesToHex(derived)
+        )
+
+        log(
+            "Migrando credencial legada para chave exclusiva do nó $id."
+        )
     }
 
     private fun parseNodeInfo(message: String): NodeInfo {
