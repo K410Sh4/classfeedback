@@ -22,7 +22,9 @@
     <application
         android:name=".PrivateLinkApplication"
         android:allowBackup="false"
-        android:label="LENDAS PrivateLink"
+        android:icon="@drawable/esphub_icon"
+        android:roundIcon="@drawable/esphub_icon"
+        android:label="ESPhub"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
