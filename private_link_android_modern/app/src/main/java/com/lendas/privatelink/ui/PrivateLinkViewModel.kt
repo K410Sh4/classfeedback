@@ -2,12 +2,14 @@ package com.lendas.privatelink.ui
 
 import android.app.Application
 import android.net.Uri
+import android.util.Base64
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lendas.privatelink.PrivateLinkApplication
 import com.lendas.privatelink.ble.PrivateLinkBleManager
 import com.lendas.privatelink.core.FastOtaCredentials
+import com.lendas.privatelink.core.LabStatus
 import com.lendas.privatelink.core.LinkState
 import com.lendas.privatelink.core.NearbyDevice
 import com.lendas.privatelink.core.NodeInfo
@@ -241,6 +243,159 @@ class PrivateLinkViewModel(application: Application) :
     ) {
         sessions[address]?.sendCommand(command)
     }
+
+    fun startLabTest(
+        address: String,
+        ssid: String,
+        password: String,
+        targetIpv4: String,
+        port: Int,
+        level: Int,
+        durationSeconds: Int
+    ): Result<Unit> {
+        return runCatching {
+            val node =
+                nodeByAddress(address)
+                    ?: error("Nó não encontrado.")
+
+            require(node.authenticated) {
+                "Conecte e autentique o nó primeiro."
+            }
+
+            require(
+                "LABTEST_V1" in node.info.capabilities
+            ) {
+                "Este firmware não oferece LabTest V1."
+            }
+
+            require(
+                ssid.isNotBlank() &&
+                    ssid.length <= 32
+            ) {
+                "SSID inválido."
+            }
+
+            require(
+                password.isEmpty() ||
+                    password.length in 8..63
+            ) {
+                "Senha Wi-Fi deve ter 8–63 caracteres, ou ficar vazia para rede aberta."
+            }
+
+            require(
+                port in 1024..65535
+            ) {
+                "Use uma porta de laboratório entre 1024 e 65535."
+            }
+
+            require(
+                level in 1..3
+            ) {
+                "Nível deve ser 1, 2 ou 3."
+            }
+
+            require(
+                durationSeconds in 5..60
+            ) {
+                "Duração permitida: 5–60 segundos."
+            }
+
+            val ipRegex =
+                Regex(
+                    """^(?:\\d{1,3}\\.){3}\\d{1,3}$"""
+                )
+
+            require(
+                targetIpv4.matches(ipRegex)
+            ) {
+                "Informe o IPv4 privado do PC coletor."
+            }
+
+            val ssidB64 =
+                Base64.encodeToString(
+                    ssid.toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP
+                )
+
+            val passwordB64 =
+                Base64.encodeToString(
+                    password.toByteArray(Charsets.UTF_8),
+                    Base64.NO_WRAP
+                )
+
+            val manager =
+                sessions[address]
+                    ?: error("Sessão BLE não disponível.")
+
+            manager.sendCommand(
+                "LAB_WIFI|" + ssidB64 + "|" + passwordB64
+            )
+
+            manager.sendCommand(
+                "LAB_CONFIG|" +
+                    targetIpv4 +
+                    "|" +
+                    port +
+                    "|" +
+                    level +
+                    "|" +
+                    durationSeconds
+            )
+
+            manager.sendCommand(
+                "LAB_START"
+            )
+
+            updateNode(address) {
+                it.copy(
+                    lab =
+                        LabStatus(
+                            state = "STARTING",
+                            level = level,
+                            target = targetIpv4,
+                            port = port
+                        ),
+                    lastError = null
+                )
+            }
+
+            addLog(
+                address,
+                "LabTest solicitado • nível " +
+                    level +
+                    " • " +
+                    durationSeconds +
+                    "s • " +
+                    targetIpv4 +
+                    ":" +
+                    port
+            )
+        }
+    }
+
+    fun stopLabTest(
+        address: String
+    ) {
+        sessions[address]
+            ?.sendCommand(
+                "LAB_STOP"
+            )
+
+        addLog(
+            address,
+            "Parada do LabTest solicitada."
+        )
+    }
+
+    fun requestLabStatus(
+        address: String
+    ) {
+        sessions[address]
+            ?.sendCommand(
+                "LAB_STATUS"
+            )
+    }
+
 
     fun startSmartOta(
         uri: Uri,
@@ -888,6 +1043,10 @@ class PrivateLinkViewModel(application: Application) :
         override fun onFastOtaUnavailable(
             reason: String
         ) = Unit
+
+        override fun onLabStatus(
+            status: LabStatus
+        ) = Unit
     }
 
     private inner class NodeListener(
@@ -1042,6 +1201,31 @@ class PrivateLinkViewModel(application: Application) :
                 address,
                 reason
             )
+        }
+
+        override fun onLabStatus(
+            status: LabStatus
+        ) {
+            updateNode(address) {
+                it.copy(
+                    lab = status,
+                    lastError =
+                        if (status.state == "ERROR")
+                            status.reason
+                        else
+                            it.lastError
+                )
+            }
+
+            if (
+                status.state == "ERROR"
+            ) {
+                addLog(
+                    address,
+                    "LabTest: " +
+                        (status.reason ?: "erro")
+                )
+            }
         }
     }
 }
