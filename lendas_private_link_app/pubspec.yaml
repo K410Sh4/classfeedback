@@ -1,0 +1,24 @@
+name: lendas_s3_private_link
+description: LENDAS ESP32-S3 PrivateLink mobile controller and BLE OTA updater.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.6.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_reactive_ble: ^5.4.0
+  permission_handler: ^12.0.1
+  file_picker: ^10.3.3
+  crypto: ^3.0.6
+  flutter_secure_storage: ^9.2.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
