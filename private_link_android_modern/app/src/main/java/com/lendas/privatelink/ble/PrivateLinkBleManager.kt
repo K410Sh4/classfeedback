@@ -112,7 +112,7 @@ class PrivateLinkBleManager(
                         context,
                         bondReceiver,
                         IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-                        ContextCompat.RECEIVER_NOT_EXPORTED
+                        ContextCompat.RECEIVER_EXPORTED
                     )
                     receiverRegistered = true
                 }.onFailure { error ->
@@ -1153,6 +1153,21 @@ class PrivateLinkBleManager(
 
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            runCatching {
+                handleBondIntent(intent)
+            }.onFailure { error ->
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Falha ao processar pareamento BLE"
+                )
+                log(
+                    "Bond receiver protegido: ${error.javaClass.simpleName}: ${error.message}"
+                )
+            }
+        }
+    }
+
+    private fun handleBondIntent(intent: Intent?) {
             if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
 
             val device = if (Build.VERSION.SDK_INT >= 33) {
@@ -1230,10 +1245,37 @@ class PrivateLinkBleManager(
                 }
             }
         }
-    }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(
+            bluetoothGatt: BluetoothGatt,
+            status: Int,
+            newState: Int
+        ) {
+            runCatching {
+                handleConnectionStateChange(
+                    bluetoothGatt,
+                    status,
+                    newState
+                )
+            }.onFailure { error ->
+                connected = false
+                authenticated = false
+                listener.onAuthenticated(false)
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Falha interna na sessão BLE"
+                )
+                log(
+                    "onConnectionStateChange protegido: ${error.javaClass.simpleName}: ${error.message}"
+                )
+                runCatching {
+                    bluetoothGatt.disconnect()
+                }
+            }
+        }
+
+        private fun handleConnectionStateChange(
             bluetoothGatt: BluetoothGatt,
             status: Int,
             newState: Int
