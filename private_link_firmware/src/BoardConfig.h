@@ -9,6 +9,7 @@
 #define PL_BOARD "PrivateLink-S3"
 #define PL_ROLE "PRIMARY_NODE"
 #define PL_CAPS "BLE,WIFI,RESEARCH,FAST_OTA"
+#define PL_MAX_APP_SIZE 0x600000
 
 #elif CONFIG_IDF_TARGET_ESP32C6
 
@@ -17,6 +18,7 @@
 #define PL_BOARD "nanoESP32-C6-V1.0"
 #define PL_ROLE "RADIO_NODE"
 #define PL_CAPS "BLE,WIFI,RESEARCH,FAST_OTA,IEEE802154_READY"
+#define PL_MAX_APP_SIZE 0x180000
 
 #else
 #error "Unsupported target for PrivateLink Multi-Node firmware"
