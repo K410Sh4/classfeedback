@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lendas.privatelink.PrivateLinkApplication
 import com.lendas.privatelink.ble.PrivateLinkBleManager
 import com.lendas.privatelink.core.FastOtaCredentials
 import com.lendas.privatelink.core.LinkState
@@ -29,9 +30,28 @@ class PrivateLinkViewModel(application: Application) :
 
     private val secureKeyStore = SecureKeyStore(application)
 
+    private val startupCrash =
+        PrivateLinkApplication.consumeLastCrash(
+            application
+        )
+
     private val _state = MutableStateFlow(
         PrivateLinkUiState(
-            hasPrivateKey = secureKeyStore.hasKey()
+            hasPrivateKey = secureKeyStore.hasKey(),
+            lastError =
+                if (startupCrash != null)
+                    "O aplicativo fechou inesperadamente na sessão anterior."
+                else
+                    null,
+            logs =
+                if (startupCrash != null)
+                    listOf(
+                        "CRASH DA SESSÃO ANTERIOR:",
+                        startupCrash,
+                        "Pronto."
+                    )
+                else
+                    listOf("Pronto.")
         )
     )
 
