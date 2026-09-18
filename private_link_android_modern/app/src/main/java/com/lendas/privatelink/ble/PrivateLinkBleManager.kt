@@ -41,7 +41,8 @@ import java.util.Locale
 
 class PrivateLinkBleManager(
     private val context: Context,
-    private val listener: Listener
+    private val listener: Listener,
+    private val enableBondReceiver: Boolean = true
 ) {
     interface Listener {
         fun onLinkState(state: LinkState, text: String)
@@ -104,14 +105,26 @@ class PrivateLinkBleManager(
     private var receiverRegistered = false
 
     init {
-        handler.post {
-            ContextCompat.registerReceiver(
-                context,
-                bondReceiver,
-                IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-            receiverRegistered = true
+        if (enableBondReceiver) {
+            handler.post {
+                runCatching {
+                    ContextCompat.registerReceiver(
+                        context,
+                        bondReceiver,
+                        IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+                        ContextCompat.RECEIVER_NOT_EXPORTED
+                    )
+                    receiverRegistered = true
+                }.onFailure { error ->
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Falha ao iniciar monitor de pareamento"
+                    )
+                    log(
+                        "Receiver de bonding não registrado: ${error.javaClass.simpleName}: ${error.message}"
+                    )
+                }
+            }
         }
     }
 
@@ -337,25 +350,63 @@ class PrivateLinkBleManager(
     }
 
     private fun connectGatt(device: BluetoothDevice) {
-        if (!hasBlePermissions()) return
+        if (!hasBlePermissions()) {
+            listener.onLinkState(
+                LinkState.Error,
+                "Permissões Bluetooth ausentes"
+            )
+            return
+        }
 
         runCatching { gatt?.close() }
         gatt = null
         servicesDiscoveryStarted = false
 
-        listener.onLinkState(LinkState.Connecting, "Conectando ao nó PrivateLink...")
+        listener.onLinkState(
+            LinkState.Connecting,
+            "Conectando ao nó PrivateLink..."
+        )
+
         log("Conectando em ${device.address}")
 
-        gatt = if (Build.VERSION.SDK_INT >= 23) {
-            device.connectGatt(
-                context,
-                false,
-                gattCallback,
-                BluetoothDevice.TRANSPORT_LE
+        val result = runCatching {
+            if (Build.VERSION.SDK_INT >= 23) {
+                device.connectGatt(
+                    context,
+                    false,
+                    gattCallback,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                device.connectGatt(
+                    context,
+                    false,
+                    gattCallback
+                )
+            }
+        }
+
+        result.onSuccess { newGatt ->
+            gatt = newGatt
+            if (newGatt == null) {
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Android não criou a sessão GATT"
+                )
+                log("connectGatt retornou null.")
+            }
+        }.onFailure { error ->
+            connected = false
+            authenticated = false
+            listener.onAuthenticated(false)
+            listener.onLinkState(
+                LinkState.Error,
+                "Falha ao abrir conexão BLE"
             )
-        } else {
-            @Suppress("DEPRECATION")
-            device.connectGatt(context, false, gattCallback)
+            log(
+                "connectGatt protegido: ${error.javaClass.simpleName}: ${error.message}"
+            )
         }
     }
 
@@ -1198,7 +1249,22 @@ class PrivateLinkBleManager(
                 log("BLE conectado.")
 
                 if (hasBlePermissions()) {
-                    beginBondingOnConnectedGatt(bluetoothGatt)
+                    runCatching {
+                        beginBondingOnConnectedGatt(
+                            bluetoothGatt
+                        )
+                    }.onFailure { error ->
+                        listener.onLinkState(
+                            LinkState.Error,
+                            "Falha ao iniciar segurança BLE"
+                        )
+                        log(
+                            "Bonding protegido: ${error.javaClass.simpleName}: ${error.message}"
+                        )
+                        runCatching {
+                            bluetoothGatt.disconnect()
+                        }
+                    }
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connected = false
