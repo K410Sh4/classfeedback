@@ -1,4 +1,4 @@
-name: Build LENDAS PrivateLink Multi-Node APK 2.3.0
+name: Build LENDAS PrivateLink Multi-Node APK 2.3.1
 
 on:
   push:
@@ -36,15 +36,15 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp private_link_android_modern/app/build/outputs/apk/release/app-release.apk LENDAS_PrivateLink_2_3_0.apk
-          sha256sum LENDAS_PrivateLink_2_3_0.apk | tee LENDAS_PrivateLink_2_3_0.sha256
+          cp private_link_android_modern/app/build/outputs/apk/release/app-release.apk LENDAS_PrivateLink_2_3_1.apk
+          sha256sum LENDAS_PrivateLink_2_3_1.apk | tee LENDAS_PrivateLink_2_3_1.sha256
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LENDAS_PrivateLink_2_3_0_APK
+          name: LENDAS_PrivateLink_2_3_1_APK
           path: |
-            LENDAS_PrivateLink_2_3_0.apk
-            LENDAS_PrivateLink_2_3_0.sha256
+            LENDAS_PrivateLink_2_3_1.apk
+            LENDAS_PrivateLink_2_3_1.sha256
           if-no-files-found: error
           retention-days: 7
