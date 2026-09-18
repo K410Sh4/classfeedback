@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothSearching
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -60,7 +60,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -98,6 +97,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lendas.privatelink.core.LinkState
 import com.lendas.privatelink.core.NearbyDevice
+import com.lendas.privatelink.core.NodeState
 import com.lendas.privatelink.core.OtaTransport
 import com.lendas.privatelink.core.PrivateLinkUiState
 import com.lendas.privatelink.core.Protocol
@@ -146,10 +146,10 @@ private enum class AppTab(
     val icon: ImageVector
 ) {
     Home("Início", Icons.Rounded.Dashboard),
+    Nodes("Nós", Icons.Rounded.Memory),
     Research("Pesquisa", Icons.Rounded.Science),
     Update("Atualizar", Icons.Rounded.SystemUpdateAlt),
-    Console("Console", Icons.Rounded.Terminal),
-    Settings("Ajustes", Icons.Rounded.Settings)
+    Console("Console", Icons.Rounded.Terminal)
 }
 
 @Composable
@@ -170,55 +170,78 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
         rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri ->
-            if (uri != null) {
+            val selected = state.selectedNode
+            if (uri != null && selected != null) {
                 runCatching {
                     context.contentResolver.takePersistableUriPermission(
                         uri,
                         android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
                 }
-                vm.startSmartOta(uri)
+
+                vm.startSmartOta(
+                    uri,
+                    selected.address
+                )
             }
         }
 
     val wifiPermissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
-        ) { _ ->
-            // Fast OTA will use Wi-Fi when permission is available.
-            // If it is denied/unavailable, the ViewModel preserves BLE fallback.
+        ) {
             firmwarePicker.launch(
-                arrayOf("application/octet-stream", "*/*")
+                arrayOf(
+                    "application/octet-stream",
+                    "*/*"
+                )
             )
         }
 
     val requestScan: () -> Unit = {
-        val permissions = requiredBlePermissions()
-        val missing = permissions.filter {
-            ContextCompat.checkSelfPermission(context, it) !=
-                PackageManager.PERMISSION_GRANTED
-        }
+        val missing =
+            requiredBlePermissions().filter {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    it
+                ) != PackageManager.PERMISSION_GRANTED
+            }
 
         if (missing.isEmpty()) {
             vm.startScan()
         } else {
-            blePermissionLauncher.launch(missing.toTypedArray())
+            blePermissionLauncher.launch(
+                missing.toTypedArray()
+            )
         }
     }
 
     val requestFirmware: () -> Unit = {
-        val permissions = requiredFastOtaPermissions()
-        val missing = permissions.filter {
-            ContextCompat.checkSelfPermission(context, it) !=
-                PackageManager.PERMISSION_GRANTED
+        if (state.selectedNode == null) {
+            return@let
         }
+    }
+
+    val launchFirmwarePicker: () -> Unit = {
+        val missing =
+            requiredFastOtaPermissions().filter {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    it
+                ) != PackageManager.PERMISSION_GRANTED
+            }
 
         if (missing.isEmpty()) {
             firmwarePicker.launch(
-                arrayOf("application/octet-stream", "*/*")
+                arrayOf(
+                    "application/octet-stream",
+                    "*/*"
+                )
             )
         } else {
-            wifiPermissionLauncher.launch(missing.toTypedArray())
+            wifiPermissionLauncher.launch(
+                missing.toTypedArray()
+            )
         }
     }
 
@@ -228,16 +251,18 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
     ) { hasKey ->
         if (!hasKey) {
             KeySetupScreen(
-                onSave = { vm.savePrivateKey(it) }
+                onSave = vm::savePrivateKey
             )
         } else {
             ModernPrivateLinkApp(
                 state = state,
                 onScan = requestScan,
                 onConnect = vm::connect,
+                onSelectNode = vm::selectNode,
                 onDisconnect = vm::disconnect,
+                onDisconnectAll = vm::disconnectAll,
                 onCommand = vm::sendCommand,
-                onPickFirmware = requestFirmware,
+                onPickFirmware = launchFirmwarePicker,
                 onAbortOta = vm::abortOta,
                 onClearKey = vm::clearPrivateKey
             )
@@ -246,36 +271,44 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
 }
 
 private fun requiredBlePermissions(): List<String> =
-    when {
-        Build.VERSION.SDK_INT >= 31 -> listOf(
+    if (Build.VERSION.SDK_INT >= 31) {
+        listOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT
         )
-
-        else -> listOf(
+    } else {
+        listOf(
             Manifest.permission.ACCESS_FINE_LOCATION
         )
     }
 
 private fun requiredFastOtaPermissions(): List<String> =
     when {
-        Build.VERSION.SDK_INT >= 33 -> listOf(
-            Manifest.permission.NEARBY_WIFI_DEVICES
-        )
+        Build.VERSION.SDK_INT >= 33 ->
+            listOf(
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            )
 
-        Build.VERSION.SDK_INT >= 29 -> listOf(
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
+        Build.VERSION.SDK_INT >= 29 ->
+            listOf(
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
 
-        else -> emptyList()
+        else ->
+            emptyList()
     }
 
 @Composable
 private fun KeySetupScreen(
     onSave: (String) -> Result<Unit>
 ) {
-    var key by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
+    var key by remember {
+        mutableStateOf("")
+    }
+
+    var error by remember {
+        mutableStateOf<String?>(null)
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -289,53 +322,33 @@ private fun KeySetupScreen(
         ) {
             item {
                 Icon(
-                    imageVector = Icons.Rounded.Security,
+                    Icons.Rounded.Security,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(56.dp)
                 )
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(
+                    Modifier.height(20.dp)
+                )
 
                 Text(
-                    "PrivateLink",
+                    "PrivateLink Multi-Node",
                     style = MaterialTheme.typography.headlineLarge,
                     fontWeight = FontWeight.SemiBold
                 )
 
                 Text(
-                    "Configure o vínculo criptográfico com seu ESP32-S3.",
+                    "Uma chave mestre no Android. Cada ESP32 novo recebe uma chave derivada independente.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyLarge
                 )
 
-                Spacer(Modifier.height(28.dp))
+                Spacer(
+                    Modifier.height(28.dp)
+                )
 
                 ModernCard {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Rounded.Lock,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                "Chave privada HMAC",
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                "Armazenada com Android Keystore",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-
-                    Spacer(Modifier.height(18.dp))
-
                     OutlinedTextField(
                         value = key,
                         onValueChange = {
@@ -343,36 +356,54 @@ private fun KeySetupScreen(
                             error = null
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("64 caracteres hexadecimais") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Ascii
-                        ),
+                        label = {
+                            Text(
+                                "Chave mestre • 64 caracteres hex"
+                            )
+                        },
+                        visualTransformation =
+                            PasswordVisualTransformation(),
+                        keyboardOptions =
+                            KeyboardOptions(
+                                keyboardType =
+                                    KeyboardType.Ascii
+                            ),
                         singleLine = true,
                         isError = error != null,
                         supportingText = {
-                            Text(error ?: "${key.length}/64")
+                            Text(
+                                error
+                                    ?: "${key.length}/64"
+                            )
                         }
                     )
 
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(
+                        Modifier.height(12.dp)
+                    )
 
                     Button(
                         onClick = {
-                            val result = onSave(key)
-                            error = result.exceptionOrNull()?.message
+                            error =
+                                onSave(key)
+                                    .exceptionOrNull()
+                                    ?.message
                         },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = key.length == 64
                     ) {
-                        Text("Proteger e continuar")
+                        Text(
+                            "Proteger e continuar"
+                        )
                     }
                 }
 
-                Spacer(Modifier.height(18.dp))
+                Spacer(
+                    Modifier.height(16.dp)
+                )
 
                 Text(
-                    "Passkey BLE do projeto: ${Protocol.PAIRING_PASSKEY}",
+                    "Passkey BLE: ${Protocol.PAIRING_PASSKEY}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -387,62 +418,102 @@ private fun ModernPrivateLinkApp(
     state: PrivateLinkUiState,
     onScan: () -> Unit,
     onConnect: (NearbyDevice) -> Unit,
-    onDisconnect: () -> Unit,
-    onCommand: (String) -> Unit,
+    onSelectNode: (String) -> Unit,
+    onDisconnect: (String) -> Unit,
+    onDisconnectAll: () -> Unit,
+    onCommand: (String, String) -> Unit,
     onPickFirmware: () -> Unit,
-    onAbortOta: () -> Unit,
+    onAbortOta: (String) -> Unit,
     onClearKey: () -> Unit
 ) {
-    var selectedTab by remember { mutableStateOf(AppTab.Home) }
+    var selectedTab by remember {
+        mutableStateOf(AppTab.Home)
+    }
+
+    var showSettings by remember {
+        mutableStateOf(false)
+    }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor =
+            MaterialTheme.colorScheme.background,
         topBar = {
             CenterAlignedTopAppBar(
                 title = {
                     Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
+                        horizontalAlignment =
+                            Alignment.CenterHorizontally
                     ) {
                         Text(
-                            "LENDAS S3",
+                            "LENDAS PRIVATE LINK",
                             fontWeight = FontWeight.Bold
                         )
+
                         Text(
-                            "PrivateLink ${BuildConfig.VERSION_NAME}",
+                            "Multi-Node ${BuildConfig.VERSION_NAME}",
                             fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color =
+                                MaterialTheme.colorScheme
+                                    .onSurfaceVariant
                         )
                     }
                 },
-                actions = {
-                    if (state.connectedAddress != null) {
-                        IconButton(onClick = onDisconnect) {
+                navigationIcon = {
+                    if (showSettings) {
+                        IconButton(
+                            onClick = {
+                                showSettings = false
+                            }
+                        ) {
                             Icon(
-                                Icons.Rounded.LinkOff,
-                                contentDescription = "Desconectar"
+                                Icons.Rounded.Close,
+                                contentDescription = "Fechar ajustes"
                             )
                         }
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = {
+                            showSettings =
+                                !showSettings
+                        }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Settings,
+                            contentDescription = "Ajustes"
+                        )
                     }
                 }
             )
         },
         bottomBar = {
-            NavigationBar {
-                AppTab.entries.forEach { tab ->
-                    NavigationBarItem(
-                        selected = selectedTab == tab,
-                        onClick = { selectedTab = tab },
-                        icon = {
-                            Icon(tab.icon, contentDescription = tab.label)
-                        },
-                        label = {
-                            Text(
-                                tab.label,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    )
+            if (!showSettings) {
+                NavigationBar {
+                    AppTab.entries.forEach { tab ->
+                        NavigationBarItem(
+                            selected =
+                                selectedTab == tab,
+                            onClick = {
+                                selectedTab = tab
+                            },
+                            icon = {
+                                Icon(
+                                    tab.icon,
+                                    contentDescription =
+                                        tab.label
+                                )
+                            },
+                            label = {
+                                Text(
+                                    tab.label,
+                                    maxLines = 1,
+                                    overflow =
+                                        TextOverflow.Ellipsis
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -452,28 +523,60 @@ private fun ModernPrivateLinkApp(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            when (selectedTab) {
-                AppTab.Home -> HomeScreen(
-                    state,
-                    onScan,
-                    onConnect,
-                    onCommand
+            if (showSettings) {
+                SettingsScreen(
+                    state = state,
+                    onDisconnectAll =
+                        onDisconnectAll,
+                    onClearKey =
+                        onClearKey
                 )
+            } else {
+                when (selectedTab) {
+                    AppTab.Home ->
+                        HomeScreen(
+                            state = state,
+                            onScan = onScan,
+                            onSelectNode =
+                                onSelectNode,
+                            onCommand =
+                                onCommand
+                        )
 
-                AppTab.Research -> ResearchScreen(state.telemetry)
+                    AppTab.Nodes ->
+                        NodesScreen(
+                            state = state,
+                            onScan = onScan,
+                            onConnect = onConnect,
+                            onSelectNode =
+                                onSelectNode,
+                            onDisconnect =
+                                onDisconnect
+                        )
 
-                AppTab.Update -> UpdateScreen(
-                    state,
-                    onPickFirmware,
-                    onAbortOta
-                )
+                    AppTab.Research ->
+                        ResearchScreen(
+                            state = state,
+                            onSelectNode =
+                                onSelectNode
+                        )
 
-                AppTab.Console -> ConsoleScreen(state.logs)
+                    AppTab.Update ->
+                        UpdateScreen(
+                            state = state,
+                            onSelectNode =
+                                onSelectNode,
+                            onPickFirmware =
+                                onPickFirmware,
+                            onAbortOta =
+                                onAbortOta
+                        )
 
-                AppTab.Settings -> SettingsScreen(
-                    state,
-                    onClearKey
-                )
+                    AppTab.Console ->
+                        ConsoleScreen(
+                            state.logs
+                        )
+                }
             }
         }
     }
@@ -483,793 +586,928 @@ private fun ModernPrivateLinkApp(
 private fun HomeScreen(
     state: PrivateLinkUiState,
     onScan: () -> Unit,
-    onConnect: (NearbyDevice) -> Unit,
-    onCommand: (String) -> Unit
+    onSelectNode: (String) -> Unit,
+    onCommand: (String, String) -> Unit
 ) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(Modifier.height(4.dp))
-            ConnectionHero(state, onScan)
+            Spacer(
+                Modifier.height(4.dp)
+            )
+
+            ModernCard {
+                Row(
+                    verticalAlignment =
+                        Alignment.CenterVertically
+                ) {
+                    val active =
+                        state.authenticatedCount
+
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(
+                                (
+                                    if (active > 0)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.secondary
+                                    ).copy(alpha = 0.14f),
+                                CircleShape
+                            ),
+                        contentAlignment =
+                            Alignment.Center
+                    ) {
+                        Icon(
+                            if (active > 0)
+                                Icons.Rounded.CheckCircle
+                            else
+                                Icons.Rounded.BluetoothSearching,
+                            contentDescription = null,
+                            tint =
+                                if (active > 0)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.secondary
+                        )
+                    }
+
+                    Spacer(
+                        Modifier.width(14.dp)
+                    )
+
+                    Column(
+                        modifier =
+                            Modifier.weight(1f)
+                    ) {
+                        Text(
+                            if (active == 0)
+                                "Nenhum nó autenticado"
+                            else
+                                "$active nó(s) online",
+                            style =
+                                MaterialTheme.typography.titleLarge,
+                            fontWeight =
+                                FontWeight.SemiBold
+                        )
+
+                        Text(
+                            "S3 + C6 podem enviar telemetria simultaneamente",
+                            color =
+                                MaterialTheme.colorScheme
+                                    .onSurfaceVariant,
+                            style =
+                                MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                Spacer(
+                    Modifier.height(16.dp)
+                )
+
+                Button(
+                    onClick = onScan,
+                    modifier =
+                        Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Rounded.BluetoothSearching,
+                        contentDescription = null
+                    )
+
+                    Spacer(
+                        Modifier.width(8.dp)
+                    )
+
+                    Text(
+                        if (state.scanning)
+                            "Buscando..."
+                        else
+                            "Buscar nós PrivateLink"
+                    )
+                }
+            }
         }
 
-        if (!state.authenticated && state.devices.isNotEmpty()) {
+        if (state.nodes.isNotEmpty()) {
             item {
                 SectionTitle(
-                    "Dispositivos próximos",
-                    "Apenas PrivateLink dentro da faixa configurada"
+                    "Nós conectados",
+                    "Cada dispositivo mantém sua própria sessão segura"
                 )
             }
 
             items(
-                items = state.devices,
+                state.nodes,
                 key = { it.address }
-            ) { device ->
-                DeviceCard(device, onConnect)
-            }
-        }
-
-        item {
-            SectionTitle(
-                "Sistema",
-                "Estado atual do ESP32-S3"
-            )
-
-            val t = state.telemetry
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                MetricCard(
-                    modifier = Modifier.weight(1f),
-                    icon = Icons.Rounded.Memory,
-                    label = "Firmware",
-                    value = t.firmware
-                )
-                MetricCard(
-                    modifier = Modifier.weight(1f),
-                    icon = Icons.Rounded.Timer,
-                    label = "Uptime",
-                    value = formatUptime(t.uptimeMs)
-                )
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                MetricCard(
-                    modifier = Modifier.weight(1f),
-                    icon = Icons.Rounded.Storage,
-                    label = "Heap",
-                    value = formatHeap(t.heap)
-                )
-                MetricCard(
-                    modifier = Modifier.weight(1f),
-                    icon = Icons.Rounded.SignalCellularAlt,
-                    label = "Bateria",
-                    value =
-                        if (t.batteryVolts == "na") "Não configurada"
-                        else "${t.batteryVolts} V"
+            ) { node ->
+                NodeSummaryCard(
+                    node = node,
+                    selected =
+                        state.selectedNode?.address ==
+                            node.address,
+                    onClick = {
+                        onSelectNode(
+                            node.address
+                        )
+                    }
                 )
             }
         }
 
-        item {
-            SectionTitle(
-                "Ações rápidas",
-                "Comandos disponíveis no canal autenticado"
-            )
-
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                FilledTonalButton(
-                    onClick = { onCommand("PING") },
-                    enabled = state.authenticated
-                ) {
-                    Text("PING")
-                }
-
-                FilledTonalButton(
-                    onClick = { onCommand("STATUS") },
-                    enabled = state.authenticated
-                ) {
-                    Icon(
-                        Icons.Rounded.Refresh,
-                        contentDescription = null
+        state.selectedNode?.let { node ->
+            if (node.authenticated) {
+                item {
+                    SectionTitle(
+                        "Ações rápidas",
+                        node.displayName
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Atualizar status")
-                }
 
-                OutlinedButton(
-                    onClick = { onCommand("REBOOT") },
-                    enabled = state.authenticated
-                ) {
-                    Text("Reiniciar S3")
+                    FlowRow(
+                        horizontalArrangement =
+                            Arrangement.spacedBy(
+                                8.dp
+                            ),
+                        verticalArrangement =
+                            Arrangement.spacedBy(
+                                8.dp
+                            )
+                    ) {
+                        FilledTonalButton(
+                            onClick = {
+                                onCommand(
+                                    node.address,
+                                    "PING"
+                                )
+                            }
+                        ) {
+                            Text("PING")
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
+                                onCommand(
+                                    node.address,
+                                    "STATUS"
+                                )
+                            }
+                        ) {
+                            Icon(
+                                Icons.Rounded.Refresh,
+                                contentDescription = null
+                            )
+
+                            Spacer(
+                                Modifier.width(6.dp)
+                            )
+
+                            Text(
+                                "Atualizar status"
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                onCommand(
+                                    node.address,
+                                    "REBOOT"
+                                )
+                            }
+                        ) {
+                            Text(
+                                "Reiniciar nó"
+                            )
+                        }
+                    }
+
+                    Spacer(
+                        Modifier.height(24.dp)
+                    )
                 }
             }
-
-            Spacer(Modifier.height(28.dp))
         }
     }
 }
 
 @Composable
-private fun ConnectionHero(
+private fun NodesScreen(
     state: PrivateLinkUiState,
-    onScan: () -> Unit
+    onScan: () -> Unit,
+    onConnect: (NearbyDevice) -> Unit,
+    onSelectNode: (String) -> Unit,
+    onDisconnect: (String) -> Unit
 ) {
-    ModernCard {
-        Row(
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            val statusColor = when (state.linkState) {
-                LinkState.Ready -> Color(0xFF5EEAD4)
-                LinkState.Error -> MaterialTheme.colorScheme.error
-                LinkState.Updating -> Color(0xFFA78BFA)
-                else -> MaterialTheme.colorScheme.secondary
-            }
-
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .background(
-                        statusColor.copy(alpha = 0.14f),
-                        CircleShape
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector =
-                        if (state.authenticated) Icons.Rounded.CheckCircle
-                        else Icons.Rounded.Bluetooth,
-                    contentDescription = null,
-                    tint = statusColor
-                )
-            }
-
-            Spacer(Modifier.width(14.dp))
-
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    state.statusText,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                val detail = when {
-                    state.authenticated ->
-                        state.connectedAddress ?: "Canal seguro ativo"
-                    state.connectedAddress != null ->
-                        state.connectedAddress
-                    else ->
-                        "ESP32-S3 N16R8 • BLE seguro"
-                }
-
-                Text(
-                    detail,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        if (state.linkState == LinkState.Scanning ||
-            state.linkState == LinkState.Connecting ||
-            state.linkState == LinkState.Authenticating ||
-            state.linkState == LinkState.Pairing
-        ) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth()
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Spacer(
+                Modifier.height(4.dp)
             )
-        } else if (!state.authenticated) {
+
+            SectionTitle(
+                "Dispositivos",
+                "Gerencie S3 e C6 independentemente"
+            )
+
             Button(
                 onClick = onScan,
-                modifier = Modifier.fillMaxWidth()
+                modifier =
+                    Modifier.fillMaxWidth()
             ) {
                 Icon(
                     Icons.Rounded.BluetoothSearching,
                     contentDescription = null
                 )
-                Spacer(Modifier.width(8.dp))
-                Text("Buscar meu ESP32-S3")
-            }
-        } else {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AssistChip(
-                    onClick = {},
-                    label = { Text("HMAC autenticado") },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Rounded.Security,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+
+                Spacer(
+                    Modifier.width(8.dp)
                 )
 
-                AssistChip(
-                    onClick = {},
-                    label = { Text("BLE seguro") }
+                Text(
+                    if (state.scanning)
+                        "Buscando PrivateLink..."
+                    else
+                        "Procurar outro nó"
                 )
             }
         }
-    }
-}
 
-@Composable
-private fun DeviceCard(
-    device: NearbyDevice,
-    onConnect: (NearbyDevice) -> Unit
-) {
-    ModernCard {
-        Row(
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.Rounded.Bluetooth,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary
+        if (state.devices.isNotEmpty()) {
+            item {
+                SectionTitle(
+                    "Encontrados",
+                    "Serviço PrivateLink detectado"
+                )
+            }
+
+            items(
+                state.devices,
+                key = { it.address }
+            ) { device ->
+                ModernCard {
+                    Row(
+                        verticalAlignment =
+                            Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Rounded.Bluetooth,
+                            contentDescription = null,
+                            tint =
+                                MaterialTheme.colorScheme.secondary
+                        )
+
+                        Spacer(
+                            Modifier.width(12.dp)
+                        )
+
+                        Column(
+                            modifier =
+                                Modifier.weight(1f)
+                        ) {
+                            Text(
+                                "PrivateLink Node",
+                                fontWeight =
+                                    FontWeight.SemiBold
+                            )
+
+                            Text(
+                                "${device.address} • ${device.rssi} dBm",
+                                color =
+                                    MaterialTheme.colorScheme
+                                        .onSurfaceVariant,
+                                style =
+                                    MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                onConnect(device)
+                            }
+                        ) {
+                            Text("Conectar")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (state.nodes.isNotEmpty()) {
+            item {
+                SectionTitle(
+                    "Sessões",
+                    "${state.authenticatedCount} autenticada(s)"
+                )
+            }
+
+            items(
+                state.nodes,
+                key = { it.address }
+            ) { node ->
+                ModernCard {
+                    NodeHeader(node)
+
+                    Spacer(
+                        Modifier.height(14.dp)
+                    )
+
+                    FlowRow(
+                        horizontalArrangement =
+                            Arrangement.spacedBy(
+                                8.dp
+                            ),
+                        verticalArrangement =
+                            Arrangement.spacedBy(
+                                8.dp
+                            )
+                    ) {
+                        AssistChip(
+                            onClick = {
+                                onSelectNode(
+                                    node.address
+                                )
+                            },
+                            label = {
+                                Text(
+                                    if (
+                                        state.selectedNode?.address ==
+                                        node.address
+                                    ) "Selecionado"
+                                    else "Selecionar"
+                                )
+                            }
+                        )
+
+                        if (
+                            node.info.role != null
+                        ) {
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        humanRole(
+                                            node.info.role
+                                        )
+                                    )
+                                }
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                onDisconnect(
+                                    node.address
+                                )
+                            }
+                        ) {
+                            Icon(
+                                Icons.Rounded.LinkOff,
+                                contentDescription = null
+                            )
+
+                            Spacer(
+                                Modifier.width(6.dp)
+                            )
+
+                            Text("Desconectar")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(
+                Modifier.height(24.dp)
             )
-
-            Spacer(Modifier.width(12.dp))
-
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(
-                    "ESP32-S3 PrivateLink",
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    "${device.address} • ${device.rssi} dBm",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-
-            Button(
-                onClick = { onConnect(device) }
-            ) {
-                Text("Conectar")
-            }
         }
     }
 }
 
 @Composable
 private fun ResearchScreen(
-    telemetry: Telemetry
+    state: PrivateLinkUiState,
+    onSelectNode: (String) -> Unit
 ) {
+    val researchNodes =
+        state.nodes.filter {
+            it.authenticated
+        }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(Modifier.height(4.dp))
+            Spacer(
+                Modifier.height(4.dp)
+            )
 
             ModernCard {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment =
+                        Alignment.CenterVertically
                 ) {
                     Icon(
                         Icons.Rounded.Science,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.size(34.dp)
+                        tint =
+                            MaterialTheme.colorScheme.tertiary,
+                        modifier =
+                            Modifier.size(36.dp)
                     )
-                    Spacer(Modifier.width(12.dp))
+
+                    Spacer(
+                        Modifier.width(12.dp)
+                    )
+
                     Column {
                         Text(
-                            "Observatório de rádio",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
+                            "Observatório Multi-Node",
+                            style =
+                                MaterialTheme.typography.titleLarge,
+                            fontWeight =
+                                FontWeight.SemiBold
                         )
+
                         Text(
-                            "Levantamento passivo de Wi‑Fi e BLE",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            "Medições passivas recebidas de cada nó",
+                            color =
+                                MaterialTheme.colorScheme
+                                    .onSurfaceVariant
                         )
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(
+                    Modifier.height(12.dp)
+                )
 
                 AssistChip(
                     onClick = {},
-                    label = { Text("PASSIVO • sem transmissão ofensiva") },
+                    label = {
+                        Text(
+                            "PASSIVO • sem transmissão ofensiva"
+                        )
+                    },
                     leadingIcon = {
                         Icon(
                             Icons.Rounded.Security,
                             contentDescription = null,
-                            modifier = Modifier.size(17.dp)
+                            modifier =
+                                Modifier.size(17.dp)
                         )
                     }
                 )
             }
         }
 
-        if (telemetry.wifiAp == null && telemetry.bleSeen == null) {
-            item {
-                EmptyResearchCard()
-            }
-        } else {
-            item {
-                SectionTitle(
-                    "Wi‑Fi",
-                    "Ambiente 2,4 GHz observado pelo ESP32-S3"
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    MetricCard(
-                        Modifier.weight(1f),
-                        Icons.Rounded.Wifi,
-                        "APs",
-                        telemetry.wifiAp?.toString() ?: "-"
-                    )
-                    MetricCard(
-                        Modifier.weight(1f),
-                        Icons.Rounded.Lock,
-                        "Seguras",
-                        telemetry.wifiSecure?.toString() ?: "-"
-                    )
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    MetricCard(
-                        Modifier.weight(1f),
-                        Icons.Rounded.Info,
-                        "Abertas",
-                        telemetry.wifiOpen?.toString() ?: "-"
-                    )
-                    MetricCard(
-                        Modifier.weight(1f),
-                        Icons.Rounded.SignalCellularAlt,
-                        "Melhor RSSI",
-                        telemetry.wifiBest?.let { "$it dBm" } ?: "-"
-                    )
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                ModernCard {
-                    Text(
-                        "Canal com maior presença",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        telemetry.wifiPeakChannel?.let {
-                            "Canal $it • ${telemetry.wifiPeakCount ?: 0} APs"
-                        } ?: "-",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-
-            item {
-                SectionTitle(
-                    "Bluetooth Low Energy",
-                    "Advertising observado passivamente"
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    MetricCard(
-                        Modifier.weight(1f),
-                        Icons.Rounded.Bluetooth,
-                        "Anunciantes",
-                        telemetry.bleSeen?.toString() ?: "-"
-                    )
-                    MetricCard(
-                        Modifier.weight(1f),
-                        Icons.Rounded.SignalCellularAlt,
-                        "Melhor RSSI",
-                        telemetry.bleBest?.let { "$it dBm" } ?: "-"
-                    )
-                }
-            }
-
+        if (researchNodes.isEmpty()) {
             item {
                 ModernCard {
                     Text(
-                        "Último levantamento",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        "Aguardando nós autenticados",
+                        fontWeight =
+                            FontWeight.SemiBold
                     )
+
                     Text(
-                        formatAge(telemetry.surveyAgeMs),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
+                        "Conecte o S3 e/ou C6 para receber as medições.",
+                        color =
+                            MaterialTheme.colorScheme
+                                .onSurfaceVariant
                     )
                 }
-
-                Spacer(Modifier.height(28.dp))
             }
         }
-    }
-}
 
-@Composable
-private fun EmptyResearchCard() {
-    ModernCard {
-        Icon(
-            Icons.Rounded.Science,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(38.dp)
-        )
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "Aguardando telemetria Research",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            "A tela já está preparada para firmware 1.1.0+ com survey passivo de Wi‑Fi e BLE.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        items(
+            researchNodes,
+            key = { it.address }
+        ) { node ->
+            ResearchNodeCard(
+                node = node,
+                selected =
+                    state.selectedNode?.address ==
+                        node.address,
+                onSelect = {
+                    onSelectNode(
+                        node.address
+                    )
+                }
+            )
+        }
+
+        item {
+            Spacer(
+                Modifier.height(24.dp)
+            )
+        }
     }
 }
 
 @Composable
 private fun UpdateScreen(
     state: PrivateLinkUiState,
+    onSelectNode: (String) -> Unit,
     onPickFirmware: () -> Unit,
-    onAbortOta: () -> Unit
+    onAbortOta: (String) -> Unit
 ) {
-    val updating = state.linkState in setOf(
-        LinkState.PreparingFastOta,
-        LinkState.ConnectingFastOta,
-        LinkState.Updating,
-        LinkState.Verifying
-    )
-
-    val transportLabel = when (state.otaTransport) {
-        OtaTransport.WifiFast -> "Wi‑Fi privado rápido"
-        OtaTransport.Ble -> "BLE compatível"
-        OtaTransport.None -> "Automático"
-    }
+    val selected =
+        state.selectedNode
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(Modifier.height(4.dp))
+            Spacer(
+                Modifier.height(4.dp)
+            )
 
-            ModernCard {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Rounded.SystemUpdateAlt,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(38.dp)
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(
-                            "Atualização inteligente",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
+            SectionTitle(
+                "Atualização por nó",
+                "O app impede misturar firmware C6 e S3"
+            )
+
+            if (state.nodes.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement =
+                        Arrangement.spacedBy(
+                            8.dp
+                        ),
+                    verticalArrangement =
+                        Arrangement.spacedBy(
+                            8.dp
                         )
-                        Text(
-                            "BLE negocia a sessão; Wi‑Fi temporário acelera o firmware",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    AssistChip(
-                        onClick = {},
-                        label = { Text(transportLabel) },
-                        leadingIcon = {
-                            Icon(
-                                if (state.otaTransport == OtaTransport.Ble)
-                                    Icons.Rounded.Bluetooth
-                                else
-                                    Icons.Rounded.Wifi,
-                                contentDescription = null,
-                                modifier = Modifier.size(17.dp)
-                            )
-                        }
-                    )
-
-                    if (state.otaTransport == OtaTransport.WifiFast) {
+                    state.nodes.forEach { node ->
                         AssistChip(
-                            onClick = {},
-                            label = { Text("rede efêmera") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Rounded.Lock,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(17.dp)
+                            onClick = {
+                                onSelectNode(
+                                    node.address
                                 )
+                            },
+                            label = {
+                                Text(
+                                    node.displayName
+                                )
+                            },
+                            leadingIcon = {
+                                if (
+                                    selected?.address ==
+                                    node.address
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.CheckCircle,
+                                        contentDescription = null,
+                                        modifier =
+                                            Modifier.size(
+                                                17.dp
+                                            )
+                                    )
+                                }
                             }
                         )
                     }
                 }
+            }
+        }
 
-                Spacer(Modifier.height(14.dp))
-
-                if (state.otaFileName != null) {
+        if (selected == null) {
+            item {
+                ModernCard {
                     Text(
-                        state.otaFileName,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        "Selecione um nó",
+                        fontWeight =
+                            FontWeight.SemiBold
                     )
-                    Spacer(Modifier.height(8.dp))
+
+                    Text(
+                        "Conecte um ESP32-S3 ou nanoESP32-C6 antes de escolher o firmware.",
+                        color =
+                            MaterialTheme.colorScheme
+                                .onSurfaceVariant
+                    )
                 }
-
-                LinearProgressIndicator(
-                    progress = { state.otaProgress },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        String.format(
-                            Locale.US,
-                            "%.1f%%",
-                            state.otaProgress * 100f
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (state.otaSpeedBytesPerSecond != null) {
-                        Text(
-                            formatTransferSpeed(
-                                state.otaSpeedBytesPerSecond
-                            ),
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
+            }
+        } else {
+            item {
+                OtaCard(
+                    node = selected,
+                    onPickFirmware =
+                        onPickFirmware,
+                    onAbort = {
+                        onAbortOta(
+                            selected.address
                         )
                     }
-                }
+                )
+            }
 
-                if (state.otaTotalBytes > 0L) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "${formatBytes(state.otaTransferredBytes)} / " +
-                            formatBytes(state.otaTotalBytes),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall
+            item {
+                ModernCard {
+                    SecurityRow(
+                        Icons.Rounded.Bluetooth,
+                        "Controle por BLE",
+                        "Sessão autenticada do nó selecionado"
+                    )
+
+                    HorizontalDivider(
+                        modifier =
+                            Modifier.padding(
+                                vertical = 12.dp
+                            )
+                    )
+
+                    SecurityRow(
+                        Icons.Rounded.Wifi,
+                        "Fast OTA",
+                        "Wi-Fi temporário apenas durante a transferência"
+                    )
+
+                    HorizontalDivider(
+                        modifier =
+                            Modifier.padding(
+                                vertical = 12.dp
+                            )
+                    )
+
+                    SecurityRow(
+                        Icons.Rounded.Security,
+                        "SHA-256 + HMAC",
+                        "Integridade e autenticidade verificadas no nó"
                     )
                 }
-
-                Spacer(Modifier.height(14.dp))
-
-                if (updating) {
-                    OutlinedButton(
-                        onClick = onAbortOta,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Cancelar atualização")
-                    }
-                } else {
-                    Button(
-                        onClick = onPickFirmware,
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = state.authenticated
-                    ) {
-                        Icon(
-                            Icons.Rounded.UploadFile,
-                            contentDescription = null
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Atualizar firmware")
-                    }
-                }
             }
         }
 
         item {
-            SectionTitle(
-                "Como funciona",
-                "Transporte coordenado e sem digitar senha"
+            Spacer(
+                Modifier.height(24.dp)
             )
-
-            ModernCard {
-                SecurityRow(
-                    Icons.Rounded.Bluetooth,
-                    "1. Controle por BLE",
-                    "O canal já autenticado solicita uma sessão OTA"
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp)
-                )
-                SecurityRow(
-                    Icons.Rounded.Wifi,
-                    "2. Wi‑Fi temporário",
-                    "SSID, senha e token são recebidos automaticamente pelo app"
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp)
-                )
-                SecurityRow(
-                    Icons.Rounded.Security,
-                    "3. Firmware autenticado",
-                    "SHA‑256 + HMAC antes de ativar o novo slot"
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp)
-                )
-                SecurityRow(
-                    Icons.Rounded.Memory,
-                    "4. Retorno automático",
-                    "Após validar, o S3 reinicia e o AP temporário desaparece"
-                )
-            }
         }
-
-        item {
-            SectionTitle(
-                "Compatibilidade",
-                "Atualização segura mesmo em firmware antigo"
-            )
-
-            ModernCard {
-                Text(
-                    "Se o ESP32-S3 ainda não suportar Fast OTA, o app cai automaticamente para o transporte BLE já existente. Depois da primeira atualização para o firmware novo, as próximas passam a usar o canal Wi‑Fi rápido.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
-        item {
-            Text(
-                "Use somente o .bin de aplicação para OTA. Imagens FULL/merged continuam sendo destinadas ao Auto Flasher por USB.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall
-            )
-            Spacer(Modifier.height(28.dp))
-        }
-    }
-}
-
-private fun formatTransferSpeed(bytesPerSecond: Long?): String {
-    val value = bytesPerSecond ?: return "-"
-
-    return when {
-        value >= 1024L * 1024L ->
-            String.format(
-                Locale.US,
-                "%.2f MB/s",
-                value / (1024.0 * 1024.0)
-            )
-
-        value >= 1024L ->
-            String.format(
-                Locale.US,
-                "%.0f KB/s",
-                value / 1024.0
-            )
-
-        else -> "$value B/s"
-    }
-}
-
-private fun formatBytes(bytes: Long): String {
-    return when {
-        bytes >= 1024L * 1024L ->
-            String.format(
-                Locale.US,
-                "%.2f MB",
-                bytes / (1024.0 * 1024.0)
-            )
-
-        bytes >= 1024L ->
-            String.format(
-                Locale.US,
-                "%.0f KB",
-                bytes / 1024.0
-            )
-
-        else -> "$bytes B"
     }
 }
 
 @Composable
-private fun ConsoleScreen(logs: List<String>) {
+private fun OtaCard(
+    node: NodeState,
+    onPickFirmware: () -> Unit,
+    onAbort: () -> Unit
+) {
+    val updating =
+        node.linkState in setOf(
+            LinkState.PreparingFastOta,
+            LinkState.ConnectingFastOta,
+            LinkState.Updating,
+            LinkState.Verifying
+        )
+
+    val transport =
+        when (node.otaTransport) {
+            OtaTransport.WifiFast ->
+                "Wi-Fi privado rápido"
+
+            OtaTransport.Ble ->
+                "BLE compatível"
+
+            OtaTransport.None ->
+                "Automático"
+        }
+
+    ModernCard {
+        NodeHeader(node)
+
+        Spacer(
+            Modifier.height(16.dp)
+        )
+
+        AssistChip(
+            onClick = {},
+            label = {
+                Text(transport)
+            },
+            leadingIcon = {
+                Icon(
+                    if (
+                        node.otaTransport ==
+                        OtaTransport.Ble
+                    ) Icons.Rounded.Bluetooth
+                    else Icons.Rounded.Wifi,
+                    contentDescription = null,
+                    modifier =
+                        Modifier.size(17.dp)
+                )
+            }
+        )
+
+        Spacer(
+            Modifier.height(14.dp)
+        )
+
+        node.otaFileName?.let {
+            Text(
+                it,
+                fontWeight =
+                    FontWeight.Medium,
+                maxLines = 1,
+                overflow =
+                    TextOverflow.Ellipsis
+            )
+
+            Spacer(
+                Modifier.height(8.dp)
+            )
+        }
+
+        LinearProgressIndicator(
+            progress = {
+                node.otaProgress
+            },
+            modifier =
+                Modifier.fillMaxWidth()
+        )
+
+        Spacer(
+            Modifier.height(8.dp)
+        )
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.SpaceBetween
+        ) {
+            Text(
+                String.format(
+                    Locale.US,
+                    "%.1f%%",
+                    node.otaProgress * 100f
+                ),
+                color =
+                    MaterialTheme.colorScheme
+                        .onSurfaceVariant
+            )
+
+            node.otaSpeedBytesPerSecond?.let {
+                Text(
+                    formatTransferSpeed(it),
+                    color =
+                        MaterialTheme.colorScheme.primary,
+                    fontWeight =
+                        FontWeight.SemiBold
+                )
+            }
+        }
+
+        if (node.otaTotalBytes > 0L) {
+            Text(
+                "${formatBytes(node.otaTransferredBytes)} / " +
+                    formatBytes(node.otaTotalBytes),
+                color =
+                    MaterialTheme.colorScheme
+                        .onSurfaceVariant,
+                style =
+                    MaterialTheme.typography.bodySmall
+            )
+        }
+
+        Spacer(
+            Modifier.height(14.dp)
+        )
+
+        if (updating) {
+            OutlinedButton(
+                onClick = onAbort,
+                modifier =
+                    Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "Cancelar atualização"
+                )
+            }
+        } else {
+            Button(
+                onClick = onPickFirmware,
+                modifier =
+                    Modifier.fillMaxWidth(),
+                enabled = node.authenticated
+            ) {
+                Icon(
+                    Icons.Rounded.UploadFile,
+                    contentDescription = null
+                )
+
+                Spacer(
+                    Modifier.width(8.dp)
+                )
+
+                Text(
+                    "Selecionar firmware"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConsoleScreen(
+    logs: List<String>
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp)
     ) {
-        Spacer(Modifier.height(4.dp))
+        Spacer(
+            Modifier.height(4.dp)
+        )
 
         ModernCard {
             Row(
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment =
+                    Alignment.CenterVertically
             ) {
                 Icon(
                     Icons.Rounded.Terminal,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.secondary
+                    tint =
+                        MaterialTheme.colorScheme.secondary
                 )
-                Spacer(Modifier.width(10.dp))
+
+                Spacer(
+                    Modifier.width(10.dp)
+                )
+
                 Column {
                     Text(
-                        "Console técnico",
-                        fontWeight = FontWeight.SemiBold
+                        "Console Multi-Node",
+                        fontWeight =
+                            FontWeight.SemiBold
                     )
+
                     Text(
                         "${logs.size} eventos recentes",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall
+                        color =
+                            MaterialTheme.colorScheme
+                                .onSurfaceVariant,
+                        style =
+                            MaterialTheme.typography.bodySmall
                     )
                 }
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(
+            Modifier.height(12.dp)
+        )
 
         Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF070C10)
-            ),
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
+            colors =
+                CardDefaults.cardColors(
+                    containerColor =
+                        Color(0xFF070C10)
+                ),
+            shape =
+                RoundedCornerShape(18.dp),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
         ) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement =
+                    Arrangement.spacedBy(6.dp)
             ) {
                 items(logs) { line ->
                     Text(
                         line,
-                        color = Color(0xFFC5D4DB),
-                        fontFamily = FontFamily.Monospace,
+                        color =
+                            Color(0xFFC5D4DB),
+                        fontFamily =
+                            FontFamily.Monospace,
                         fontSize = 11.sp,
                         lineHeight = 15.sp
                     )
@@ -1277,38 +1515,60 @@ private fun ConsoleScreen(logs: List<String>) {
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(
+            Modifier.height(16.dp)
+        )
     }
 }
 
 @Composable
 private fun SettingsScreen(
     state: PrivateLinkUiState,
+    onDisconnectAll: () -> Unit,
     onClearKey: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Spacer(Modifier.height(4.dp))
+            Spacer(
+                Modifier.height(4.dp)
+            )
 
             SectionTitle(
                 "Segurança",
-                "Identidade e credenciais deste telefone"
+                "Identidade local e isolamento dos nós"
             )
 
             ModernCard {
                 SecurityRow(
                     Icons.Rounded.VpnKey,
-                    "Chave HMAC",
+                    "Chave mestre",
                     "Protegida pelo Android Keystore"
                 )
 
                 HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp)
+                    modifier =
+                        Modifier.padding(
+                            vertical = 12.dp
+                        )
+                )
+
+                SecurityRow(
+                    Icons.Rounded.Security,
+                    "Chaves por nó",
+                    "Derivadas por HMAC a partir do node_id"
+                )
+
+                HorizontalDivider(
+                    modifier =
+                        Modifier.padding(
+                            vertical = 12.dp
+                        )
                 )
 
                 SecurityRow(
@@ -1316,84 +1576,368 @@ private fun SettingsScreen(
                     "Pareamento BLE",
                     "Passkey ${Protocol.PAIRING_PASSKEY}"
                 )
+            }
+        }
 
-                Spacer(Modifier.height(16.dp))
+        item {
+            SectionTitle(
+                "Sessões",
+                "${state.authenticatedCount} nó(s) autenticado(s)"
+            )
+
+            ModernCard {
+                OutlinedButton(
+                    onClick =
+                        onDisconnectAll,
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    enabled =
+                        state.nodes.isNotEmpty()
+                ) {
+                    Icon(
+                        Icons.Rounded.LinkOff,
+                        contentDescription = null
+                    )
+
+                    Spacer(
+                        Modifier.width(8.dp)
+                    )
+
+                    Text(
+                        "Desconectar todos"
+                    )
+                }
+
+                Spacer(
+                    Modifier.height(10.dp)
+                )
 
                 OutlinedButton(
-                    onClick = onClearKey,
-                    modifier = Modifier.fillMaxWidth()
+                    onClick =
+                        onClearKey,
+                    modifier =
+                        Modifier.fillMaxWidth()
                 ) {
                     Icon(
                         Icons.Rounded.DeleteForever,
                         contentDescription = null
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Trocar chave privada")
-                }
-            }
-        }
 
-        item {
-            SectionTitle(
-                "Plataforma",
-                "Base organizada para expansões futuras"
-            )
-
-            ModernCard {
-                Text(
-                    "PrivateLink Mobile 2.0",
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Arquitetura separada em protocolo, BLE, segurança, estado e interface. Novos módulos podem entrar sem transformar o app em uma única tela monolítica.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(Modifier.height(14.dp))
-
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    AssistChip(
-                        onClick = {},
-                        label = { Text("N16R8") }
+                    Spacer(
+                        Modifier.width(8.dp)
                     )
-                    AssistChip(
-                        onClick = {},
-                        label = { Text("BLE") }
-                    )
-                    AssistChip(
-                        onClick = {},
-                        label = { Text("OTA") }
-                    )
-                    AssistChip(
-                        onClick = {},
-                        label = { Text("Research") }
+
+                    Text(
+                        "Trocar chave mestre"
                     )
                 }
             }
         }
 
         item {
-            SectionTitle(
-                "Sessão",
-                "Estado de segurança atual"
-            )
-
             ModernCard {
-                val ok = state.authenticated
-                SecurityRow(
-                    if (ok) Icons.Rounded.CheckCircle
-                    else Icons.Rounded.ErrorOutline,
-                    if (ok) "Autenticado" else "Desconectado",
-                    state.connectedAddress ?: "Nenhum endereço ativo"
+                Text(
+                    "PrivateLink ${BuildConfig.VERSION_NAME}",
+                    fontWeight =
+                        FontWeight.SemiBold
+                )
+
+                Spacer(
+                    Modifier.height(6.dp)
+                )
+
+                Text(
+                    "Arquitetura Multi-Node: conexões BLE independentes, telemetria simultânea, chaves por nó e OTA direcionada por hardware.",
+                    color =
+                        MaterialTheme.colorScheme
+                            .onSurfaceVariant
                 )
             }
 
-            Spacer(Modifier.height(28.dp))
+            Spacer(
+                Modifier.height(24.dp)
+            )
         }
+    }
+}
+
+@Composable
+private fun NodeSummaryCard(
+    node: NodeState,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    ModernCard {
+        NodeHeader(node)
+
+        Spacer(
+            Modifier.height(12.dp)
+        )
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.SpaceBetween,
+            verticalAlignment =
+                Alignment.CenterVertically
+        ) {
+            FlowRow(
+                horizontalArrangement =
+                    Arrangement.spacedBy(8.dp)
+            ) {
+                AssistChip(
+                    onClick = onClick,
+                    label = {
+                        Text(
+                            if (selected)
+                                "Selecionado"
+                            else
+                                "Selecionar"
+                        )
+                    }
+                )
+
+                if (node.authenticated) {
+                    AssistChip(
+                        onClick = {},
+                        label = {
+                            Text(
+                                "Seguro"
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Rounded.Lock,
+                                contentDescription = null,
+                                modifier =
+                                    Modifier.size(16.dp)
+                            )
+                        }
+                    )
+                }
+            }
+
+            Text(
+                node.info.firmware,
+                color =
+                    MaterialTheme.colorScheme
+                        .onSurfaceVariant,
+                style =
+                    MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun NodeHeader(
+    node: NodeState
+) {
+    Row(
+        verticalAlignment =
+            Alignment.CenterVertically
+    ) {
+        val ok =
+            node.authenticated
+
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(
+                    (
+                        if (ok)
+                            MaterialTheme.colorScheme.primary
+                        else if (
+                            node.linkState ==
+                            LinkState.Error
+                        )
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.secondary
+                        ).copy(
+                            alpha = 0.14f
+                        ),
+                    CircleShape
+                ),
+            contentAlignment =
+                Alignment.Center
+        ) {
+            Icon(
+                if (ok)
+                    Icons.Rounded.CheckCircle
+                else if (
+                    node.linkState ==
+                    LinkState.Error
+                )
+                    Icons.Rounded.ErrorOutline
+                else
+                    Icons.Rounded.Memory,
+                contentDescription = null,
+                tint =
+                    if (ok)
+                        MaterialTheme.colorScheme.primary
+                    else if (
+                        node.linkState ==
+                        LinkState.Error
+                    )
+                        MaterialTheme.colorScheme.error
+                    else
+                        MaterialTheme.colorScheme.secondary
+            )
+        }
+
+        Spacer(
+            Modifier.width(12.dp)
+        )
+
+        Column(
+            modifier =
+                Modifier.weight(1f)
+        ) {
+            Text(
+                node.displayName,
+                fontWeight =
+                    FontWeight.SemiBold,
+                style =
+                    MaterialTheme.typography.titleMedium
+            )
+
+            Text(
+                node.statusText,
+                color =
+                    MaterialTheme.colorScheme
+                        .onSurfaceVariant,
+                style =
+                    MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow =
+                    TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun ResearchNodeCard(
+    node: NodeState,
+    selected: Boolean,
+    onSelect: () -> Unit
+) {
+    val t =
+        node.telemetry
+
+    ModernCard {
+        Row(
+            verticalAlignment =
+                Alignment.CenterVertically
+        ) {
+            Column(
+                modifier =
+                    Modifier.weight(1f)
+            ) {
+                Text(
+                    node.displayName,
+                    fontWeight =
+                        FontWeight.SemiBold,
+                    style =
+                        MaterialTheme.typography.titleMedium
+                )
+
+                Text(
+                    node.info.nodeId
+                        ?: node.address,
+                    color =
+                        MaterialTheme.colorScheme
+                            .onSurfaceVariant,
+                    style =
+                        MaterialTheme.typography.bodySmall
+                )
+            }
+
+            AssistChip(
+                onClick = onSelect,
+                label = {
+                    Text(
+                        if (selected)
+                            "Selecionado"
+                        else
+                            "Selecionar"
+                    )
+                }
+            )
+        }
+
+        Spacer(
+            Modifier.height(14.dp)
+        )
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.spacedBy(10.dp)
+        ) {
+            MetricCard(
+                Modifier.weight(1f),
+                Icons.Rounded.Wifi,
+                "Wi-Fi APs",
+                t.wifiAp?.toString()
+                    ?: "-"
+            )
+
+            MetricCard(
+                Modifier.weight(1f),
+                Icons.Rounded.Bluetooth,
+                "BLE vistos",
+                t.bleSeen?.toString()
+                    ?: "-"
+            )
+        }
+
+        Spacer(
+            Modifier.height(10.dp)
+        )
+
+        Row(
+            modifier =
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.spacedBy(10.dp)
+        ) {
+            MetricCard(
+                Modifier.weight(1f),
+                Icons.Rounded.SignalCellularAlt,
+                "Wi-Fi RSSI",
+                t.wifiBest?.let {
+                    "$it dBm"
+                } ?: "-"
+            )
+
+            MetricCard(
+                Modifier.weight(1f),
+                Icons.Rounded.SignalCellularAlt,
+                "BLE RSSI",
+                t.bleBest?.let {
+                    "$it dBm"
+                } ?: "-"
+            )
+        }
+
+        Spacer(
+            Modifier.height(10.dp)
+        )
+
+        Text(
+            t.wifiPeakChannel?.let {
+                "Canal Wi-Fi mais ocupado: $it • ${t.wifiPeakCount ?: 0} APs"
+            } ?: "Aguardando survey passivo",
+            color =
+                MaterialTheme.colorScheme
+                    .onSurfaceVariant,
+            style =
+                MaterialTheme.typography.bodySmall
+        )
     }
 }
 
@@ -1410,13 +1954,19 @@ private fun SectionTitle(
     ) {
         Text(
             title,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold
+            style =
+                MaterialTheme.typography.titleLarge,
+            fontWeight =
+                FontWeight.SemiBold
         )
+
         Text(
             subtitle,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall
+            color =
+                MaterialTheme.colorScheme
+                    .onSurfaceVariant,
+            style =
+                MaterialTheme.typography.bodySmall
         )
     }
 }
@@ -1426,14 +1976,19 @@ private fun ModernCard(
     content: @Composable ColumnScope.() -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+        modifier =
+            Modifier.fillMaxWidth(),
+        shape =
+            RoundedCornerShape(22.dp),
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    MaterialTheme.colorScheme.surface
+            )
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
+            modifier =
+                Modifier.padding(18.dp),
             content = content
         )
     }
@@ -1448,32 +2003,50 @@ private fun MetricCard(
 ) {
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+        shape =
+            RoundedCornerShape(18.dp),
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    MaterialTheme.colorScheme
+                        .surfaceVariant
+            )
     ) {
         Column(
-            modifier = Modifier.padding(16.dp)
+            modifier =
+                Modifier.padding(14.dp)
         ) {
             Icon(
                 icon,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp)
+                tint =
+                    MaterialTheme.colorScheme.primary,
+                modifier =
+                    Modifier.size(21.dp)
             )
-            Spacer(Modifier.height(12.dp))
+
+            Spacer(
+                Modifier.height(10.dp)
+            )
+
             Text(
                 label,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelMedium
+                color =
+                    MaterialTheme.colorScheme
+                        .onSurfaceVariant,
+                style =
+                    MaterialTheme.typography.labelMedium
             )
+
             Text(
                 value,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
+                style =
+                    MaterialTheme.typography.titleMedium,
+                fontWeight =
+                    FontWeight.SemiBold,
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis
+                overflow =
+                    TextOverflow.Ellipsis
             )
         }
     }
@@ -1486,53 +2059,99 @@ private fun SecurityRow(
     subtitle: String
 ) {
     Row(
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment =
+            Alignment.CenterVertically
     ) {
         Icon(
             icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary
+            tint =
+                MaterialTheme.colorScheme.primary
         )
-        Spacer(Modifier.width(12.dp))
+
+        Spacer(
+            Modifier.width(12.dp)
+        )
+
         Column {
             Text(
                 title,
-                fontWeight = FontWeight.SemiBold
+                fontWeight =
+                    FontWeight.SemiBold
             )
+
             Text(
                 subtitle,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall
+                color =
+                    MaterialTheme.colorScheme
+                        .onSurfaceVariant,
+                style =
+                    MaterialTheme.typography.bodySmall
             )
         }
     }
 }
 
-private fun formatUptime(ms: Long?): String {
-    if (ms == null) return "-"
-    val seconds = ms / 1000
-    val hours = seconds / 3600
-    val minutes = (seconds % 3600) / 60
-
-    return when {
-        hours > 0 -> "${hours}h ${minutes}m"
-        minutes > 0 -> "${minutes}m"
-        else -> "${seconds}s"
+private fun humanRole(
+    role: String
+): String =
+    when (role) {
+        "PRIMARY_NODE" ->
+            "Primary"
+        "RADIO_NODE" ->
+            "Radio"
+        else ->
+            role
     }
-}
 
-private fun formatHeap(bytes: Long?): String {
-    if (bytes == null) return "-"
-    return String.format(Locale.US, "%.0f KB", bytes / 1024.0)
-}
+private fun formatTransferSpeed(
+    bytesPerSecond: Long
+): String =
+    when {
+        bytesPerSecond >=
+            1024L * 1024L ->
+            String.format(
+                Locale.US,
+                "%.2f MB/s",
+                bytesPerSecond /
+                    (1024.0 * 1024.0)
+            )
 
-private fun formatAge(ms: Long?): String {
-    if (ms == null) return "-"
-    if (ms < 1000) return "agora"
-    val seconds = ms / 1000
-    return if (seconds < 60) {
-        "há ${seconds}s"
-    } else {
-        "há ${seconds / 60} min"
+        bytesPerSecond >=
+            1024L ->
+            String.format(
+                Locale.US,
+                "%.0f KB/s",
+                bytesPerSecond /
+                    1024.0
+            )
+
+        else ->
+            "$bytesPerSecond B/s"
     }
-}
+
+private fun formatBytes(
+    bytes: Long
+): String =
+    when {
+        bytes >=
+            1024L * 1024L ->
+            String.format(
+                Locale.US,
+                "%.2f MB",
+                bytes /
+                    (1024.0 * 1024.0)
+            )
+
+        bytes >=
+            1024L ->
+            String.format(
+                Locale.US,
+                "%.0f KB",
+                bytes /
+                    1024.0
+            )
+
+        else ->
+            "$bytes B"
+    }
