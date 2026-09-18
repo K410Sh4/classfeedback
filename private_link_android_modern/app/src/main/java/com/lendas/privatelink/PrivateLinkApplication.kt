@@ -1,5 +1,6 @@
 package com.lendas.privatelink
 
+import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import java.io.PrintWriter
@@ -43,7 +44,7 @@ class PrivateLinkApplication : Application() {
                             "\n" +
                             writer.toString()
                     )
-                    .apply()
+                    .commit()
             }
 
             previous?.uncaughtException(
@@ -59,6 +60,81 @@ class PrivateLinkApplication : Application() {
 
         private const val KEY_LAST_CRASH =
             "last_crash"
+
+        private const val KEY_LAST_EXIT_TS =
+            "last_exit_ts"
+
+
+        fun consumePreviousExit(
+            context: Context
+        ): String? {
+            if (android.os.Build.VERSION.SDK_INT < 30) {
+                return null
+            }
+
+            val manager =
+                context.getSystemService(
+                    Context.ACTIVITY_SERVICE
+                ) as? ActivityManager
+                    ?: return null
+
+            val prefs =
+                context.getSharedPreferences(
+                    PREFS,
+                    Context.MODE_PRIVATE
+                )
+
+            val lastReported =
+                prefs.getLong(
+                    KEY_LAST_EXIT_TS,
+                    0L
+                )
+
+            val exit =
+                runCatching {
+                    manager.getHistoricalProcessExitReasons(
+                        null,
+                        0,
+                        5
+                    )
+                }.getOrNull()
+                    ?.firstOrNull {
+                        it.timestamp > lastReported
+                    }
+                    ?: return null
+
+            prefs.edit()
+                .putLong(
+                    KEY_LAST_EXIT_TS,
+                    exit.timestamp
+                )
+                .commit()
+
+            val reason =
+                when (exit.reason) {
+                    android.app.ApplicationExitInfo.REASON_CRASH ->
+                        "CRASH_JAVA"
+                    android.app.ApplicationExitInfo.REASON_CRASH_NATIVE ->
+                        "CRASH_NATIVE"
+                    android.app.ApplicationExitInfo.REASON_ANR ->
+                        "ANR"
+                    android.app.ApplicationExitInfo.REASON_LOW_MEMORY ->
+                        "LOW_MEMORY"
+                    android.app.ApplicationExitInfo.REASON_USER_REQUESTED ->
+                        "USER_REQUESTED"
+                    else ->
+                        "REASON_" + exit.reason
+                }
+
+            return (
+                "Última saída do processo: " +
+                    reason +
+                    " • status=" +
+                    exit.status +
+                    " • importance=" +
+                    exit.importance
+            )
+        }
 
         fun consumeLastCrash(
             context: Context
