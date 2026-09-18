@@ -733,14 +733,18 @@ void service() {
             g.level
         );
 
-    const uint32_t intervalUs =
-        max(
-            static_cast<uint32_t>(1),
-            1000000UL /
-                static_cast<uint32_t>(
-                    profile.pps
-                )
+    const uint32_t divisor =
+        static_cast<uint32_t>(
+            profile.pps
         );
+
+    const uint32_t intervalUs =
+        divisor == 0
+            ? 1000000UL
+            : (
+                1000000UL /
+                divisor
+            );
 
     const uint32_t nowUs =
         micros();
