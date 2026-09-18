@@ -17,6 +17,7 @@ import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import com.lendas.privatelink.core.Crypto
 import com.lendas.privatelink.core.FastOtaCredentials
+import com.lendas.privatelink.core.LabStatus
 import com.lendas.privatelink.core.LinkState
 import com.lendas.privatelink.core.NearbyDevice
 import com.lendas.privatelink.core.NodeInfo
@@ -53,6 +54,7 @@ class PrivateLinkBleManager(
         fun onConnectedAddress(address: String?)
         fun onFastOtaReady(credentials: FastOtaCredentials)
         fun onFastOtaUnavailable(reason: String)
+        fun onLabStatus(status: LabStatus)
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -562,6 +564,10 @@ class PrivateLinkBleManager(
                         )
                     )
                 }
+
+                message.startsWith("LAB_") -> {
+                    handleLabMessage(message)
+                }
             }
         }.onFailure { error ->
             log(
@@ -574,6 +580,78 @@ class PrivateLinkBleManager(
                 "Resposta inválida recebida do nó"
             )
         }
+    }
+
+    private fun handleLabMessage(
+        message: String
+    ) {
+        if (
+            message == "LAB_WIFI_OK"
+        ) {
+            log("LabTest: credenciais Wi-Fi aceitas pelo nó.")
+            return
+        }
+
+        val map = parseFields(message)
+
+        val state =
+            when {
+                message.startsWith("LAB_STARTED|") ->
+                    "RUNNING"
+                message.startsWith("LAB_TEL|") ->
+                    map["state"] ?: "RUNNING"
+                message.startsWith("LAB_CONNECTING|") ->
+                    "CONNECTING"
+                message.startsWith("LAB_STOPPED|") ->
+                    "STOPPED"
+                message.startsWith("LAB_ERROR|") ->
+                    "ERROR"
+                message.startsWith("LAB_STATUS|") ->
+                    map["state"] ?: "IDLE"
+                else ->
+                    map["state"] ?: "IDLE"
+            }
+
+        listener.onLabStatus(
+            LabStatus(
+                state = state,
+                level =
+                    map["level"]
+                        ?.toIntOrNull()
+                        ?: 0,
+                target =
+                    map["target"],
+                port =
+                    map["port"]
+                        ?.toIntOrNull(),
+                profilePps =
+                    map["profile_pps"]
+                        ?.toIntOrNull(),
+                packetBytes =
+                    map["packet_bytes"]
+                        ?.toIntOrNull(),
+                txPackets =
+                    map["tx_packets"]
+                        ?.toLongOrNull()
+                        ?: 0L,
+                txBytes =
+                    map["tx_bytes"]
+                        ?.toLongOrNull()
+                        ?: 0L,
+                actualPps =
+                    map["actual_pps"]
+                        ?.toIntOrNull(),
+                elapsedMs =
+                    map["elapsed_ms"]
+                        ?.toLongOrNull()
+                        ?: 0L,
+                rssi =
+                    map["rssi"]
+                        ?.toIntOrNull(),
+                reason =
+                    map["reason"]
+            )
+        )
     }
 
     private fun handleProvisionRequired(
