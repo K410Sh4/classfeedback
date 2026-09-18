@@ -327,7 +327,7 @@ private fun KeySetupScreen(
                 )
 
                 Text(
-                    "PrivateLink Multi-Node",
+                    "ESPhub",
                     style = MaterialTheme.typography.headlineLarge,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -439,7 +439,7 @@ private fun ModernPrivateLinkApp(
                             Alignment.CenterHorizontally
                     ) {
                         Text(
-                            "LENDAS PRIVATE LINK",
+                            "ESPhub",
                             fontWeight = FontWeight.Bold
                         )
 
@@ -684,7 +684,7 @@ private fun HomeScreen(
                         if (state.scanning)
                             "Buscando..."
                         else
-                            "Buscar nós PrivateLink"
+                            "Buscar nós ESPhub"
                     )
                 }
             }
@@ -833,7 +833,7 @@ private fun NodesScreen(
                     if (state.scanning)
                         "Buscando PrivateLink..."
                     else
-                        "Procurar outro nó"
+                        "Procurar outro nó ESPhub"
                 )
             }
         }
@@ -842,7 +842,7 @@ private fun NodesScreen(
             item {
                 SectionTitle(
                     "Encontrados",
-                    "Serviço PrivateLink detectado"
+                    "Serviço ESPhub detectado"
                 )
             }
 
@@ -871,7 +871,7 @@ private fun NodesScreen(
                                 Modifier.weight(1f)
                         ) {
                             Text(
-                                "PrivateLink Node",
+                                "ESPhub Node",
                                 fontWeight =
                                     FontWeight.SemiBold
                             )
@@ -1631,7 +1631,7 @@ private fun SettingsScreen(
         item {
             ModernCard {
                 Text(
-                    "PrivateLink ${BuildConfig.VERSION_NAME}",
+                    "ESPhub ${BuildConfig.VERSION_NAME}",
                     fontWeight =
                         FontWeight.SemiBold
                 )
