@@ -30,6 +30,7 @@ import com.lendas.privatelink.core.Crypto
 import com.lendas.privatelink.core.FastOtaCredentials
 import com.lendas.privatelink.core.LinkState
 import com.lendas.privatelink.core.NearbyDevice
+import com.lendas.privatelink.core.NodeInfo
 import com.lendas.privatelink.core.Protocol
 import com.lendas.privatelink.core.Telemetry
 import java.nio.charset.StandardCharsets
@@ -48,6 +49,7 @@ class PrivateLinkBleManager(
         fun onLog(message: String)
         fun onAuthenticated(authenticated: Boolean)
         fun onTelemetry(telemetry: Telemetry)
+        fun onNodeInfo(info: NodeInfo)
         fun onOtaProgress(progress: Float, fileName: String?)
         fun onConnectedAddress(address: String?)
         fun onFastOtaReady(credentials: FastOtaCredentials)
@@ -72,6 +74,8 @@ class PrivateLinkBleManager(
     private var connected = false
     private var authenticated = false
     private var privateKey: ByteArray? = null
+    private var sessionKey: ByteArray? = null
+    private var nodeId: String? = null
     private var authGeneration = 0
     private var awaitingBond = false
     private var bondGeneration = 0
@@ -119,7 +123,14 @@ class PrivateLinkBleManager(
 
     fun setPrivateKey(key: ByteArray?) {
         privateKey = key
+        sessionKey = null
+        nodeId = null
     }
+
+    fun currentSessionKey(): ByteArray? =
+        (sessionKey ?: privateKey)?.copyOf()
+
+    fun currentNodeId(): String? = nodeId
 
     fun isBluetoothEnabled(): Boolean = adapter?.isEnabled == true
 
@@ -223,7 +234,7 @@ class PrivateLinkBleManager(
         otaChar = null
         listener.onAuthenticated(false)
         listener.onConnectedAddress(null)
-        listener.onLinkState(LinkState.Idle, "Aguardando ESP32-S3")
+        listener.onLinkState(LinkState.Idle, "Nó PrivateLink desconectado")
     }
 
     fun sendCommand(command: String) {
@@ -276,7 +287,7 @@ class PrivateLinkBleManager(
 
 
     fun startOta(firmware: ByteArray, fileName: String) {
-        val key = privateKey
+        val key = currentSessionKey()
         if (!authenticated || key == null || otaActive || firmware.isEmpty()) {
             log("OTA indisponível no estado atual.")
             return
@@ -324,7 +335,7 @@ class PrivateLinkBleManager(
         gatt = null
         servicesDiscoveryStarted = false
 
-        listener.onLinkState(LinkState.Connecting, "Conectando ao ESP32-S3...")
+        listener.onLinkState(LinkState.Connecting, "Conectando ao nó PrivateLink...")
         log("Conectando em ${device.address}")
 
         gatt = if (Build.VERSION.SDK_INT >= 23) {
@@ -495,13 +506,13 @@ class PrivateLinkBleManager(
 
     private fun handleNotification(value: ByteArray) {
         val message = value.toString(StandardCharsets.UTF_8)
-        log("S3 → $message")
+        log("NODE → $message")
 
         when {
             message.startsWith("PROVISION_REQUIRED|") -> {
-                val key = privateKey
+                val masterKey = privateKey
 
-                if (key == null) {
+                if (masterKey == null) {
                     listener.onLinkState(
                         LinkState.Error,
                         "Chave privada não configurada no aplicativo"
@@ -519,7 +530,24 @@ class PrivateLinkBleManager(
                     return
                 }
 
-                val nonceText = parts[2].trim()
+                val isMultiNode = parts.size >= 4
+                val provisionNodeId =
+                    if (isMultiNode) parts[2].trim() else null
+                val nonceText =
+                    if (isMultiNode) parts[3].trim() else parts[2].trim()
+
+                val key =
+                    if (provisionNodeId.isNullOrBlank()) {
+                        masterKey
+                    } else {
+                        nodeId = provisionNodeId
+                        Crypto.deriveNodeKey(
+                            masterKey,
+                            provisionNodeId
+                        ).also {
+                            sessionKey = it
+                        }
+                    }
 
                 runCatching {
                     val nonce = Crypto.hexToBytes(nonceText)
@@ -530,11 +558,17 @@ class PrivateLinkBleManager(
 
                     listener.onLinkState(
                         LinkState.Authenticating,
-                        "Provisionando chave privada no ESP32-S3..."
+                        if (provisionNodeId == null)
+                            "Provisionando chave privada..."
+                        else
+                            "Provisionando identidade do nó..."
                     )
 
                     log(
-                        "Firmware novo sem chave local; provisionamento seguro iniciado pelo BLE criptografado."
+                        if (provisionNodeId == null)
+                            "Provisionamento legado iniciado pelo BLE criptografado."
+                        else
+                            "Chave independente derivada para o nó $provisionNodeId."
                     )
 
                     enqueueText(
@@ -590,8 +624,46 @@ class PrivateLinkBleManager(
                 )
             }
 
+            message.startsWith("HELLO2|") -> {
+                val masterKey = privateKey ?: return
+                val parts = message.split("|")
+
+                if (parts.size < 3) {
+                    log("HELLO2 inválido.")
+                    return
+                }
+
+                val receivedNodeId = parts[1].trim()
+                val nonceText = parts[2].trim()
+                nodeId = receivedNodeId
+
+                val key = Crypto.deriveNodeKey(
+                    masterKey,
+                    receivedNodeId
+                )
+
+                sessionKey = key
+
+                runCatching {
+                    val nonce = Crypto.hexToBytes(nonceText)
+                    val mac = Crypto.bytesToHex(
+                        Crypto.hmacSha256(key, nonce)
+                    )
+
+                    enqueueText(
+                        controlChar,
+                        "AUTH|$mac"
+                    )
+                }.onFailure {
+                    log(
+                        "HELLO2 inválido: ${it.message}"
+                    )
+                }
+            }
+
             message.startsWith("HELLO|") -> {
                 val key = privateKey ?: return
+                sessionKey = key
                 val nonceText = message.substringAfter("HELLO|").trim()
 
                 runCatching {
@@ -611,10 +683,20 @@ class PrivateLinkBleManager(
             }
 
             message.startsWith("AUTH_OK|") -> {
+                val parts = message.split("|")
+                if (parts.size >= 3 && parts[2].isNotBlank()) {
+                    nodeId = parts[2].trim()
+                }
+
                 authenticated = true
                 authGeneration++
                 listener.onAuthenticated(true)
-                listener.onLinkState(LinkState.Ready, "Canal privado autenticado")
+                listener.onLinkState(
+                    LinkState.Ready,
+                    "Canal privado autenticado"
+                )
+
+                enqueueText(controlChar, "INFO")
                 enqueueText(controlChar, "STATUS")
             }
 
@@ -626,6 +708,10 @@ class PrivateLinkBleManager(
 
             message.startsWith("TEL|") -> {
                 listener.onTelemetry(parseTelemetry(message))
+            }
+
+            message.startsWith("INFO|") -> {
+                listener.onNodeInfo(parseNodeInfo(message))
             }
 
             message.startsWith("FAST_OTA_READY|") && awaitingFastOta -> {
@@ -697,7 +783,7 @@ class PrivateLinkBleManager(
                 otaActive = false
                 waitingOtaReady = false
                 listener.onOtaProgress(1f, otaFileName)
-                listener.onLinkState(LinkState.Ready, "Firmware validado • reiniciando S3")
+                listener.onLinkState(LinkState.Ready, "Firmware validado • reiniciando nó")
                 log("OTA concluída com sucesso.")
             }
 
@@ -705,6 +791,40 @@ class PrivateLinkBleManager(
                 failOta(message.substringAfter("OTA_ERROR|"))
             }
         }
+    }
+
+    private fun parseNodeInfo(message: String): NodeInfo {
+        val map = buildMap {
+            message.split("|").drop(1).forEach { field ->
+                val index = field.indexOf('=')
+                if (index > 0) {
+                    put(
+                        field.substring(0, index),
+                        field.substring(index + 1)
+                    )
+                }
+            }
+        }
+
+        val parsedNodeId = map["node_id"]
+        if (!parsedNodeId.isNullOrBlank()) {
+            nodeId = parsedNodeId
+        }
+
+        return NodeInfo(
+            nodeId = parsedNodeId,
+            model = map["model"],
+            board = map["board"],
+            role = map["role"],
+            firmware = map["fw"] ?: "-",
+            flashBytes = map["flash_bytes"]?.toLongOrNull(),
+            capabilities = map["caps"]
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                ?.toSet()
+                ?: emptySet()
+        )
     }
 
     private fun parseTelemetry(message: String): Telemetry {
@@ -719,6 +839,10 @@ class PrivateLinkBleManager(
 
         return Telemetry(
             firmware = map["fw"] ?: "-",
+            nodeId = map["node_id"],
+            model = map["model"],
+            role = map["role"],
+            flashBytes = map["flash_bytes"]?.toLongOrNull(),
             uptimeMs = map["uptime_ms"]?.toLongOrNull(),
             heap = map["heap"]?.toLongOrNull(),
             batteryVolts = map["battery_v"] ?: "na",
@@ -743,7 +867,7 @@ class PrivateLinkBleManager(
         if (!otaActive || firmware == null || characteristic == null) return
 
         if (otaOffset >= firmware.size) {
-            listener.onLinkState(LinkState.Updating, "Validando firmware no ESP32-S3...")
+            listener.onLinkState(LinkState.Updating, "Validando firmware no nó...")
             enqueueText(controlChar, "OTA_END")
             return
         }
