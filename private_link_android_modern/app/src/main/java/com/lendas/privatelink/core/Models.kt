@@ -14,6 +14,7 @@ data class Telemetry(
     val heap: Long? = null,
     val batteryVolts: String = "na",
     val otaActive: Boolean = false,
+    val fastOtaActive: Boolean = false,
     val wifiAp: Int? = null,
     val wifiOpen: Int? = null,
     val wifiSecure: Int? = null,
@@ -32,8 +33,17 @@ enum class LinkState {
     Connecting,
     Authenticating,
     Ready,
+    PreparingFastOta,
+    ConnectingFastOta,
     Updating,
+    Verifying,
     Error
+}
+
+enum class OtaTransport {
+    None,
+    Ble,
+    WifiFast
 }
 
 data class PrivateLinkUiState(
@@ -47,6 +57,10 @@ data class PrivateLinkUiState(
     val logs: List<String> = listOf("Pronto."),
     val otaProgress: Float = 0f,
     val otaFileName: String? = null,
+    val otaTransport: OtaTransport = OtaTransport.None,
+    val otaSpeedBytesPerSecond: Long? = null,
+    val otaTransferredBytes: Long = 0L,
+    val otaTotalBytes: Long = 0L,
     val hasPrivateKey: Boolean = false,
     val lastError: String? = null
 )
