@@ -1137,6 +1137,13 @@ class PrivateLinkBleManager(
                     bondGeneration++
                     log("Pareamento concluído.")
 
+                    if (manualDisconnect) {
+                        log(
+                            "Pareamento terminou após desconexão manual; reconexão cancelada."
+                        )
+                        return
+                    }
+
                     val activeGatt = gatt
 
                     if (
@@ -1149,10 +1156,11 @@ class PrivateLinkBleManager(
                         log(
                             "Pareamento concluído após desconexão; reconectando GATT."
                         )
-                        handler.postDelayed(
-                            { connectGatt(device) },
-                            500
-                        )
+                        handler.postDelayed({
+                            if (!manualDisconnect) {
+                                connectGatt(device)
+                            }
+                        }, 500)
                     }
                 }
 
