@@ -21,6 +21,7 @@ static const char* OTA_UUID =
 
 static const char* PREF_NAMESPACE = "privatelink";
 static const char* PREF_HMAC_KEY = "hmac";
+static const char* PREF_KEY_VERSION = "keyver";
 
 static NimBLEServer* gServer = nullptr;
 static NimBLECharacteristic* gResponse = nullptr;
@@ -33,6 +34,7 @@ static String gNodeId;
 
 static uint8_t gAppAuthKey[32] = {0};
 static bool gProvisioned = false;
+static uint8_t gKeyVersion = 0;
 static uint8_t gChallenge[16] = {0};
 static uint8_t gProvisionNonce[16] = {0};
 static uint32_t gProvisionWindowDeadline = 0;
@@ -338,13 +340,20 @@ static bool loadProvisionedKey() {
             sizeof(gAppAuthKey)
         );
 
+    gKeyVersion =
+        prefs.getUChar(
+            PREF_KEY_VERSION,
+            0
+        );
+
     prefs.end();
 
     return read == sizeof(gAppAuthKey);
 }
 
 static bool storeProvisionedKey(
-    const uint8_t key[32]
+    const uint8_t key[32],
+    uint8_t keyVersion = 1
 ) {
     Preferences prefs;
 
@@ -362,9 +371,18 @@ static bool storeProvisionedKey(
             32
         );
 
+    bool versionWritten =
+        prefs.putUChar(
+            PREF_KEY_VERSION,
+            keyVersion
+        ) == 1;
+
     prefs.end();
 
-    if (written != 32) {
+    if (
+        written != 32 ||
+        !versionWritten
+    ) {
         return false;
     }
 
@@ -375,6 +393,7 @@ static bool storeProvisionedKey(
     );
 
     gProvisioned = true;
+    gKeyVersion = keyVersion;
     return true;
 }
 
@@ -1763,15 +1782,25 @@ static void processControl(
             sizeof(gChallenge)
         );
 
-        notifyText(
-            "HELLO2|" +
-            gNodeId +
-            "|" +
-            bytesToHex(
-                gChallenge,
-                sizeof(gChallenge)
-            )
-        );
+        if (gKeyVersion == 0) {
+            notifyText(
+                "HELLO|" +
+                bytesToHex(
+                    gChallenge,
+                    sizeof(gChallenge)
+                )
+            );
+        } else {
+            notifyText(
+                "HELLO2|" +
+                gNodeId +
+                "|" +
+                bytesToHex(
+                    gChallenge,
+                    sizeof(gChallenge)
+                )
+            );
+        }
 
         return;
     }
@@ -1876,6 +1905,91 @@ static void processControl(
         notifyText(
             "ERR|not_authenticated"
         );
+        return;
+    }
+
+    if (
+        message.startsWith(
+            "KEY_MIGRATE|"
+        )
+    ) {
+        if (gKeyVersion != 0) {
+            notifyText(
+                "KEY_MIGRATE_ERROR|already_current"
+            );
+            return;
+        }
+
+        String keyText =
+            fieldAt(
+                message,
+                '|',
+                1
+            );
+
+        uint8_t migratedKey[32];
+
+        if (
+            !hexToBytes(
+                keyText,
+                migratedKey,
+                sizeof(migratedKey)
+            )
+        ) {
+            notifyText(
+                "KEY_MIGRATE_ERROR|format"
+            );
+            return;
+        }
+
+        if (
+            !storeProvisionedKey(
+                migratedKey,
+                1
+            )
+        ) {
+            memset(
+                migratedKey,
+                0,
+                sizeof(migratedKey)
+            );
+
+            notifyText(
+                "KEY_MIGRATE_ERROR|storage"
+            );
+            return;
+        }
+
+        memset(
+            migratedKey,
+            0,
+            sizeof(migratedKey)
+        );
+
+        gAuthenticated = false;
+
+        notifyText(
+            "KEY_MIGRATE_OK|" +
+            gNodeId
+        );
+
+        delay(50);
+
+        fillRandomBytes(
+            gChallenge,
+            sizeof(gChallenge)
+        );
+
+        notifyText(
+            "HELLO2|" +
+            gNodeId +
+            "|" +
+            bytesToHex(
+                gChallenge,
+                sizeof(gChallenge)
+            )
+        );
+
         return;
     }
 
@@ -2269,6 +2383,19 @@ void setup() {
         gProvisioned
             ? "yes"
             : "no"
+    );
+
+    Serial.printf(
+        "Key version: %u%s\n",
+        static_cast<unsigned>(
+            gKeyVersion
+        ),
+        (
+            gProvisioned &&
+            gKeyVersion == 0
+        )
+            ? " (legacy migration pending)"
+            : ""
     );
 
     Serial.println(
