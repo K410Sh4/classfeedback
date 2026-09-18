@@ -73,6 +73,7 @@ class PrivateLinkBleManager(
 
     private var connected = false
     private var authenticated = false
+    private var manualDisconnect = false
     private var privateKey: ByteArray? = null
     private var sessionKey: ByteArray? = null
     private var nodeId: String? = null
@@ -201,6 +202,7 @@ class PrivateLinkBleManager(
     fun connect(device: NearbyDevice) {
         if (!hasBlePermissions()) return
 
+        manualDisconnect = false
         stopScan()
         pendingBondDevice = device.device
         listener.onConnectedAddress(device.address)
@@ -212,6 +214,7 @@ class PrivateLinkBleManager(
     }
 
     fun disconnect() {
+        manualDisconnect = true
         connected = false
         authenticated = false
         authGeneration++
@@ -233,6 +236,7 @@ class PrivateLinkBleManager(
         }
 
         gatt = null
+        pendingBondDevice = null
         controlChar = null
         responseChar = null
         otaChar = null
@@ -1209,6 +1213,7 @@ class PrivateLinkBleManager(
                         "GATT desconectou durante BOND_BONDING; aguardando resultado do sistema."
                     )
                 } else if (
+                    !manualDisconnect &&
                     device.bondState == BluetoothDevice.BOND_BONDED &&
                     pendingBondDevice?.address == device.address
                 ) {
@@ -1221,16 +1226,28 @@ class PrivateLinkBleManager(
                     )
 
                     handler.postDelayed({
-                        if (!connected) {
+                        if (
+                            !connected &&
+                            !manualDisconnect
+                        ) {
                             connectGatt(device)
                         }
                     }, 700)
                 } else {
                     listener.onLinkState(
                         LinkState.Idle,
-                        "BLE desconectado"
+                        if (manualDisconnect)
+                            "Desconectado pelo usuário"
+                        else
+                            "BLE desconectado"
                     )
-                    log("BLE desconectado. status=$status")
+
+                    log(
+                        if (manualDisconnect)
+                            "BLE desconectado pelo usuário."
+                        else
+                            "BLE desconectado. status=$status"
+                    )
                 }
             }
         }
