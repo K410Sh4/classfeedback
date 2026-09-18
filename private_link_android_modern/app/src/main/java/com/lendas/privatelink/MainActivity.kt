@@ -408,7 +408,7 @@ private fun ModernPrivateLinkApp(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            "PrivateLink 2.0",
+                            "PrivateLink ${BuildConfig.VERSION_NAME}",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
