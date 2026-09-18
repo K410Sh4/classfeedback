@@ -1,4 +1,4 @@
-name: Build LENDAS PrivateLink Firmware 1.2.1 BLE Security
+name: Build LENDAS PrivateLink Firmware 1.3 Stable
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout research branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-private-link-firmware-1-2-1-ble-security
+          ref: chatgpt-private-link-firmware-1-3-stable
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,7 +37,7 @@ jobs:
           set -euxo pipefail
           BUILD="private_link_firmware/.pio/build/esp32s3_n16r8"
           mkdir -p out
-          cp "$BUILD/firmware.bin" out/LENDAS_PrivateLink_v1_2_1_APP_PLACEHOLDER.bin
+          cp "$BUILD/firmware.bin" out/LENDAS_PrivateLink_v1_3_0_APP.bin
           cp "$BUILD/bootloader.bin" out/bootloader.bin
           cp "$BUILD/partitions.bin" out/partitions.bin
           BOOT_APP0="$(find ~/.platformio/packages -name boot_app0.bin | head -n 1)"
@@ -45,17 +45,17 @@ jobs:
           cp "$BOOT_APP0" out/boot_app0.bin
           ESPTOOL="$(find ~/.platformio/packages -type f -name esptool.py | head -n 1)"
           test -n "$ESPTOOL"
-          python "$ESPTOOL" --chip esp32s3 merge_bin -o out/LENDAS_PrivateLink_v1_2_1_FULL_PLACEHOLDER.bin \
+          python "$ESPTOOL" --chip esp32s3 merge_bin -o out/LENDAS_PrivateLink_v1_3_0_FULL.bin \
             0x0 out/bootloader.bin \
             0x8000 out/partitions.bin \
             0xE000 out/boot_app0.bin \
-            0x10000 out/LENDAS_PrivateLink_v1_2_1_APP_PLACEHOLDER.bin
+            0x10000 out/LENDAS_PrivateLink_v1_3_0_APP.bin
           sha256sum out/*.bin > out/SHA256SUMS.txt
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: LENDAS_PrivateLink_v1_2_1_Placeholder
+          name: LENDAS_PrivateLink_v1_3_0
           path: out/
           if-no-files-found: error
           retention-days: 7
