@@ -2,24 +2,13 @@ package com.lendas.privatelink.ble
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
@@ -35,10 +24,19 @@ import com.lendas.privatelink.core.Protocol
 import com.lendas.privatelink.core.Telemetry
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
-import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 
+/**
+ * ESPhub BLE facade.
+ *
+ * Responsibilities:
+ *  - scan PrivateLink/ESPhub service advertisements;
+ *  - delegate all GATT/bond/MTU/CCCD/write sequencing to BleSessionController;
+ *  - implement HMAC authentication, provisioning, telemetry and OTA protocol.
+ *
+ * Android BLE calls are never issued directly from this class.
+ */
 class PrivateLinkBleManager(
     private val context: Context,
     private val listener: Listener,
@@ -57,7 +55,7 @@ class PrivateLinkBleManager(
         fun onFastOtaUnavailable(reason: String)
     }
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val main = Handler(Looper.getMainLooper())
     private val bluetoothManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val adapter: BluetoothAdapter? = bluetoothManager.adapter
@@ -66,79 +64,44 @@ class PrivateLinkBleManager(
     private var scanning = false
     private val scanResults = linkedMapOf<String, ScanResult>()
 
-    private var gatt: BluetoothGatt? = null
-    private var controlChar: BluetoothGattCharacteristic? = null
-    private var responseChar: BluetoothGattCharacteristic? = null
-    private var otaChar: BluetoothGattCharacteristic? = null
-    private var pendingBondDevice: BluetoothDevice? = null
+    private val session: BleSessionController? =
+        if (enableBondReceiver) {
+            BleSessionController(
+                context,
+                SessionListener()
+            )
+        } else {
+            null
+        }
 
-    private var connected = false
+    private var closed = false
     private var authenticated = false
-    private var manualDisconnect = false
     private var privateKey: ByteArray? = null
     private var sessionKey: ByteArray? = null
     private var nodeId: String? = null
     private var legacySession = false
     private var migrationRequested = false
     private var authGeneration = 0
-    private var awaitingBond = false
-    private var bondGeneration = 0
-    private var servicesDiscoveryStarted = false
-
-    private data class WriteTask(
-        val characteristic: BluetoothGattCharacteristic,
-        val payload: ByteArray,
-        val onSuccess: (() -> Unit)? = null,
-        var attempts: Int = 0
-    )
-
-    private val writes = ArrayDeque<WriteTask>()
-    private var writing = false
 
     private var otaActive = false
     private var otaFirmware: ByteArray? = null
     private var otaFileName: String? = null
     private var otaOffset = 0
     private var waitingOtaReady = false
+
     private var awaitingFastOta = false
     private var fastOtaRequestGeneration = 0
-    private var receiverRegistered = false
 
-    init {
-        if (enableBondReceiver) {
-            handler.post {
-                runCatching {
-                    ContextCompat.registerReceiver(
-                        context,
-                        bondReceiver,
-                        IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-                        ContextCompat.RECEIVER_EXPORTED
-                    )
-                    receiverRegistered = true
-                }.onFailure { error ->
-                    listener.onLinkState(
-                        LinkState.Error,
-                        "Falha ao iniciar monitor de pareamento"
-                    )
-                    log(
-                        "Receiver de bonding não registrado: ${error.javaClass.simpleName}: ${error.message}"
-                    )
-                }
-            }
-        }
+    fun close() = onMain {
+        if (closed) return@onMain
+        closed = true
+        stopScanInternal()
+        resetProtocolState()
+        session?.close()
     }
 
-    fun close() {
-        stopScan()
-        disconnect()
-        if (receiverRegistered) {
-            runCatching { context.unregisterReceiver(bondReceiver) }
-            receiverRegistered = false
-        }
-    }
-
-    fun setPrivateKey(key: ByteArray?) {
-        privateKey = key
+    fun setPrivateKey(key: ByteArray?) = onMain {
+        privateKey = key?.copyOf()
         sessionKey = null
         nodeId = null
         legacySession = false
@@ -150,7 +113,8 @@ class PrivateLinkBleManager(
 
     fun currentNodeId(): String? = nodeId
 
-    fun isBluetoothEnabled(): Boolean = adapter?.isEnabled == true
+    fun isBluetoothEnabled(): Boolean =
+        adapter?.isEnabled == true
 
     fun hasBlePermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= 31) {
@@ -164,30 +128,47 @@ class PrivateLinkBleManager(
         }
     }
 
-    fun startScan() {
+    fun startScan() = onMain {
+        if (closed) return@onMain
+
         if (!hasBlePermissions()) {
-            listener.onLinkState(LinkState.Error, "Permissões Bluetooth necessárias")
-            return
+            listener.onLinkState(
+                LinkState.Error,
+                "Permissões Bluetooth necessárias"
+            )
+            return@onMain
         }
 
         if (!isBluetoothEnabled()) {
-            listener.onLinkState(LinkState.Error, "Ative o Bluetooth")
-            return
+            listener.onLinkState(
+                LinkState.Error,
+                "Ative o Bluetooth"
+            )
+            return@onMain
         }
 
-        stopScan()
+        stopScanInternal()
 
-        scanner = adapter?.bluetoothLeScanner
+        scanner = runCatching {
+            adapter?.bluetoothLeScanner
+        }.getOrNull()
+
         if (scanner == null) {
-            listener.onLinkState(LinkState.Error, "Scanner BLE indisponível")
-            return
+            listener.onLinkState(
+                LinkState.Error,
+                "Scanner BLE indisponível"
+            )
+            return@onMain
         }
 
         scanResults.clear()
         listener.onDevices(emptyList())
         scanning = true
-        listener.onLinkState(LinkState.Scanning, "Procurando PrivateLink próximo...")
-        log("Scan BLE iniciado com filtro do serviço PrivateLink.")
+        listener.onLinkState(
+            LinkState.Scanning,
+            "Procurando nós ESPhub..."
+        )
+        log("Scan BLE iniciado com filtro do serviço ESPhub.")
 
         val filter = ScanFilter.Builder()
             .setServiceUuid(ParcelUuid(Protocol.SERVICE_UUID))
@@ -197,79 +178,96 @@ class PrivateLinkBleManager(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        runCatching {
+            scanner?.startScan(
+                listOf(filter),
+                settings,
+                scanCallback
+            )
+        }.onFailure { error ->
+            scanning = false
+            scanner = null
+            listener.onLinkState(
+                LinkState.Error,
+                "Falha ao iniciar scan BLE"
+            )
+            log(
+                "startScan: " +
+                    error.javaClass.simpleName + ": " +
+                    (error.message ?: "")
+            )
+        }
 
-        handler.postDelayed({
-            if (scanning) stopScan()
+        main.postDelayed({
+            if (scanning) {
+                stopScanInternal()
+                listener.onLinkState(
+                    LinkState.Idle,
+                    "Busca concluída"
+                )
+            }
         }, 12_000)
     }
 
-    fun stopScan() {
-        if (scanning && hasBlePermissions()) {
-            runCatching { scanner?.stopScan(scanCallback) }
-        }
-        scanning = false
-        scanner = null
+    fun stopScan() = onMain {
+        stopScanInternal()
     }
 
-    fun connect(device: NearbyDevice) {
-        if (!hasBlePermissions()) return
+    fun connect(device: NearbyDevice) = onMain {
+        if (closed) return@onMain
 
-        manualDisconnect = false
-        stopScan()
-        pendingBondDevice = device.device
+        val activeSession = session
+        if (activeSession == null) {
+            listener.onLinkState(
+                LinkState.Error,
+                "Gerenciador de scan não pode abrir sessão"
+            )
+            return@onMain
+        }
+
+        if (!hasBlePermissions()) {
+            listener.onLinkState(
+                LinkState.Error,
+                "Permissões Bluetooth necessárias"
+            )
+            return@onMain
+        }
+
+        stopScanInternal()
+        resetProtocolState()
         listener.onConnectedAddress(device.address)
-
-        // Android BLE is more reliable when bonding starts after a real GATT
-        // connection exists. Starting createBond() from scan-only state can
-        // remain in BOND_BONDING indefinitely on some Samsung/Android builds.
-        connectGatt(device.device)
+        listener.onLinkState(
+            LinkState.Connecting,
+            "Abrindo sessão BLE..."
+        )
+        activeSession.connect(device.device)
     }
 
-    fun disconnect() {
-        manualDisconnect = true
-        connected = false
-        authenticated = false
-        authGeneration++
-        awaitingBond = false
-        bondGeneration++
-        servicesDiscoveryStarted = false
-        otaActive = false
-        waitingOtaReady = false
-        awaitingFastOta = false
-        fastOtaRequestGeneration++
-        synchronized(writes) {
-            writes.clear()
-            writing = false
-        }
-
-        if (hasBlePermissions()) {
-            runCatching { gatt?.disconnect() }
-            runCatching { gatt?.close() }
-        }
-
-        gatt = null
-        pendingBondDevice = null
-        controlChar = null
-        responseChar = null
-        otaChar = null
+    fun disconnect() = onMain {
+        resetProtocolState()
+        session?.disconnect()
         listener.onAuthenticated(false)
         listener.onConnectedAddress(null)
-        listener.onLinkState(LinkState.Idle, "Nó PrivateLink desconectado")
+        listener.onLinkState(
+            LinkState.Idle,
+            "Nó ESPhub desconectado"
+        )
     }
 
-    fun sendCommand(command: String) {
+    fun sendCommand(command: String) = onMain {
         if (!authenticated) {
             log("Comando ignorado: canal ainda não autenticado.")
-            return
+            return@onMain
         }
-        enqueueText(controlChar, command)
+        writeControl(command)
     }
 
-    fun requestFastOta() {
-        if (!authenticated || controlChar == null) {
-            listener.onFastOtaUnavailable("Canal BLE não autenticado.")
-            return
+    fun requestFastOta() = onMain {
+        if (!authenticated) {
+            listener.onFastOtaUnavailable(
+                "Canal BLE não autenticado."
+            )
+            return@onMain
         }
 
         awaitingFastOta = true
@@ -277,13 +275,13 @@ class PrivateLinkBleManager(
 
         listener.onLinkState(
             LinkState.PreparingFastOta,
-            "Preparando canal Wi‑Fi privado..."
+            "Preparando canal Wi-Fi privado..."
         )
 
         log("Solicitando sessão FAST_OTA pelo BLE autenticado.")
-        enqueueText(controlChar, "FAST_OTA_BEGIN")
+        writeControl("FAST_OTA_BEGIN")
 
-        handler.postDelayed({
+        main.postDelayed({
             if (
                 generation == fastOtaRequestGeneration &&
                 awaitingFastOta &&
@@ -291,610 +289,562 @@ class PrivateLinkBleManager(
             ) {
                 awaitingFastOta = false
                 listener.onFastOtaUnavailable(
-                    "Firmware atual não respondeu ao Fast OTA; usando BLE compatível."
+                    "Firmware não respondeu ao Fast OTA; usando BLE compatível."
                 )
             }
         }, 6_000)
     }
 
-    fun cancelFastOtaSession() {
+    fun cancelFastOtaSession() = onMain {
         awaitingFastOta = false
         fastOtaRequestGeneration++
 
         if (authenticated) {
-            enqueueText(controlChar, "FAST_OTA_CANCEL")
+            writeControl("FAST_OTA_CANCEL")
         }
     }
 
-
-    fun startOta(firmware: ByteArray, fileName: String) {
+    fun startOta(
+        firmware: ByteArray,
+        fileName: String
+    ) {
         val key = currentSessionKey()
-        if (!authenticated || key == null || otaActive || firmware.isEmpty()) {
+
+        if (
+            !authenticated ||
+            key == null ||
+            otaActive ||
+            firmware.isEmpty()
+        ) {
             log("OTA indisponível no estado atual.")
             return
         }
 
-        listener.onLinkState(LinkState.Updating, "Preparando atualização OTA...")
-        listener.onOtaProgress(0f, fileName)
+        val firmwareCopy = firmware.copyOf()
+        val safeName =
+            fileName.replace(
+                Regex("[^A-Za-z0-9._-]"),
+                "_"
+            )
+
+        listener.onLinkState(
+            LinkState.Updating,
+            "Preparando atualização OTA..."
+        )
+        listener.onOtaProgress(0f, safeName)
 
         Thread {
-            try {
-                val sha = Crypto.bytesToHex(Crypto.sha256(firmware))
-                val hmac = Crypto.bytesToHex(Crypto.hmacSha256(key, firmware))
+            runCatching {
+                val sha =
+                    Crypto.bytesToHex(
+                        Crypto.sha256(firmwareCopy)
+                    )
 
-                otaFirmware = firmware
-                otaFileName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-                otaOffset = 0
-                waitingOtaReady = true
-                otaActive = true
+                val hmac =
+                    Crypto.bytesToHex(
+                        Crypto.hmacSha256(
+                            key,
+                            firmwareCopy
+                        )
+                    )
 
-                val begin =
-                    "OTA_BEGIN|${firmware.size}|$sha|$hmac|${otaFileName}"
+                Triple(sha, hmac, firmwareCopy)
+            }.onSuccess { prepared ->
+                onMain {
+                    if (!authenticated || closed) return@onMain
 
-                handler.post {
-                    enqueueText(controlChar, begin)
-                    log("OTA solicitada: ${firmware.size} bytes.")
+                    otaFirmware = prepared.third
+                    otaFileName = safeName
+                    otaOffset = 0
+                    waitingOtaReady = true
+                    otaActive = true
+
+                    val begin =
+                        "OTA_BEGIN|" +
+                            prepared.third.size + "|" +
+                            prepared.first + "|" +
+                            prepared.second + "|" +
+                            safeName
+
+                    writeControl(begin)
+                    log(
+                        "OTA solicitada: " +
+                            prepared.third.size +
+                            " bytes."
+                    )
                 }
-            } catch (error: Exception) {
-                handler.post {
-                    failOta("Falha ao preparar imagem: ${error.message}")
+            }.onFailure { error ->
+                onMain {
+                    failOta(
+                        "Falha ao preparar imagem: " +
+                            (error.message ?: "erro desconhecido")
+                    )
                 }
             }
         }.start()
     }
 
-    fun abortOta() {
-        if (!otaActive) return
-        enqueueText(controlChar, "OTA_ABORT")
+    fun abortOta() = onMain {
+        if (!otaActive) return@onMain
+        writeControl("OTA_ABORT")
         failOta("Cancelada pelo usuário")
-    }
-
-    private fun connectGatt(device: BluetoothDevice) {
-        if (!hasBlePermissions()) {
-            listener.onLinkState(
-                LinkState.Error,
-                "Permissões Bluetooth ausentes"
-            )
-            return
-        }
-
-        runCatching { gatt?.close() }
-        gatt = null
-        servicesDiscoveryStarted = false
-
-        listener.onLinkState(
-            LinkState.Connecting,
-            "Conectando ao nó PrivateLink..."
-        )
-
-        log("Conectando em ${device.address}")
-
-        val result = runCatching {
-            if (Build.VERSION.SDK_INT >= 23) {
-                device.connectGatt(
-                    context,
-                    false,
-                    gattCallback,
-                    BluetoothDevice.TRANSPORT_LE
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                device.connectGatt(
-                    context,
-                    false,
-                    gattCallback
-                )
-            }
-        }
-
-        result.onSuccess { newGatt ->
-            gatt = newGatt
-            if (newGatt == null) {
-                listener.onLinkState(
-                    LinkState.Error,
-                    "Android não criou a sessão GATT"
-                )
-                log("connectGatt retornou null.")
-            }
-        }.onFailure { error ->
-            connected = false
-            authenticated = false
-            listener.onAuthenticated(false)
-            listener.onLinkState(
-                LinkState.Error,
-                "Falha ao abrir conexão BLE"
-            )
-            log(
-                "connectGatt protegido: ${error.javaClass.simpleName}: ${error.message}"
-            )
-        }
-    }
-
-    private fun beginBondingOnConnectedGatt(
-        bluetoothGatt: BluetoothGatt
-    ) {
-        if (!hasBlePermissions()) return
-
-        val device = bluetoothGatt.device
-
-        if (device.bondState == BluetoothDevice.BOND_BONDED) {
-            awaitingBond = false
-            continueGattSetup(bluetoothGatt)
-            return
-        }
-
-        awaitingBond = true
-        val generation = ++bondGeneration
-
-        listener.onLinkState(
-            LinkState.Pairing,
-            "Pareando • confirme o código ${Protocol.PAIRING_PASSKEY}"
-        )
-
-        log(
-            "BLE conectado; iniciando pareamento seguro com ${device.address}."
-        )
-
-        handler.postDelayed({
-            if (
-                generation != bondGeneration ||
-                !connected ||
-                gatt !== bluetoothGatt
-            ) {
-                return@postDelayed
-            }
-
-            val started = runCatching {
-                when (device.bondState) {
-                    BluetoothDevice.BOND_BONDED -> true
-                    BluetoothDevice.BOND_BONDING -> true
-                    else -> device.createBond()
-                }
-            }.getOrDefault(false)
-
-            if (!started) {
-                awaitingBond = false
-                bondGeneration++
-                listener.onLinkState(
-                    LinkState.Error,
-                    "Android não iniciou o pareamento BLE"
-                )
-                log(
-                    "createBond() foi recusado. Esqueça o dispositivo no Bluetooth e tente novamente."
-                )
-            }
-        }, 250)
-
-        handler.postDelayed({
-            if (
-                generation == bondGeneration &&
-                awaitingBond &&
-                device.bondState != BluetoothDevice.BOND_BONDED
-            ) {
-                awaitingBond = false
-                bondGeneration++
-
-                listener.onLinkState(
-                    LinkState.Error,
-                    "Pareamento expirou • tente novamente"
-                )
-
-                log(
-                    "Timeout de pareamento após 20s. O app não ficará preso indefinidamente."
-                )
-
-                runCatching { bluetoothGatt.disconnect() }
-            }
-        }, 20_000)
-    }
-
-    private fun continueGattSetup(
-        bluetoothGatt: BluetoothGatt
-    ) {
-        if (
-            !connected ||
-            gatt !== bluetoothGatt ||
-            servicesDiscoveryStarted ||
-            !hasBlePermissions()
-        ) {
-            return
-        }
-
-        servicesDiscoveryStarted = true
-
-        listener.onLinkState(
-            LinkState.Connecting,
-            "Pareado • preparando canal seguro..."
-        )
-
-        bluetoothGatt.requestConnectionPriority(
-            BluetoothGatt.CONNECTION_PRIORITY_HIGH
-        )
-
-        bluetoothGatt.requestMtu(247)
-
-        handler.postDelayed({
-            if (
-                connected &&
-                gatt === bluetoothGatt
-            ) {
-                val started = bluetoothGatt.discoverServices()
-
-                if (!started) {
-                    servicesDiscoveryStarted = false
-                    listener.onLinkState(
-                        LinkState.Error,
-                        "Não foi possível descobrir serviços BLE"
-                    )
-                    log("discoverServices() não iniciou.")
-                }
-            }
-        }, 450)
     }
 
     private fun beginAuthentication() {
         val key = privateKey
-        if (!connected || controlChar == null || key == null) {
-            log("Autenticação não iniciou: chave ou characteristic ausente.")
+
+        if (key == null) {
+            listener.onLinkState(
+                LinkState.Error,
+                "Chave privada não configurada"
+            )
             return
         }
 
         authenticated = false
         listener.onAuthenticated(false)
-        listener.onLinkState(LinkState.Authenticating, "Autenticando aplicativo...")
+        listener.onLinkState(
+            LinkState.Authenticating,
+            "Autenticando aplicativo..."
+        )
 
         val generation = ++authGeneration
-        log("Iniciando HELLO seguro...")
-        enqueueText(controlChar, "HELLO")
+        log("Iniciando HELLO seguro.")
+        writeControl("HELLO")
 
-        handler.postDelayed({
+        main.postDelayed({
             if (
                 generation == authGeneration &&
-                connected &&
-                !authenticated
+                !authenticated &&
+                !closed
             ) {
-                log("Timeout de autenticação. Repetindo HELLO...")
-                synchronized(writes) {
-                    writes.clear()
-                    writing = false
-                }
-                enqueueText(controlChar, "HELLO")
+                log("Timeout de autenticação; repetindo HELLO uma vez.")
+                writeControl("HELLO")
             }
         }, 12_000)
     }
 
     private fun handleNotification(value: ByteArray) {
-        val message = value.toString(StandardCharsets.UTF_8)
-        log("NODE → $message")
+        val message =
+            value.toString(StandardCharsets.UTF_8)
 
-        when {
-            message.startsWith("PROVISION_REQUIRED|") -> {
-                val masterKey = privateKey
+        log("NODE → " + message)
 
-                if (masterKey == null) {
-                    listener.onLinkState(
-                        LinkState.Error,
-                        "Chave privada não configurada no aplicativo"
-                    )
-                    return
-                }
+        runCatching {
+            when {
+                message.startsWith("PROVISION_REQUIRED|") ->
+                    handleProvisionRequired(message)
 
-                val parts = message.split("|")
-
-                if (parts.size < 3) {
-                    listener.onLinkState(
-                        LinkState.Error,
-                        "Resposta de provisionamento inválida"
-                    )
-                    return
-                }
-
-                val isMultiNode = parts.size >= 4
-                val provisionNodeId =
-                    if (isMultiNode) parts[2].trim() else null
-                val nonceText =
-                    if (isMultiNode) parts[3].trim() else parts[2].trim()
-
-                val key =
-                    if (provisionNodeId.isNullOrBlank()) {
-                        masterKey
-                    } else {
-                        nodeId = provisionNodeId
-                        Crypto.deriveNodeKey(
-                            masterKey,
-                            provisionNodeId
-                        ).also {
-                            sessionKey = it
-                        }
-                    }
-
-                runCatching {
-                    val nonce = Crypto.hexToBytes(nonceText)
-                    val proof = Crypto.bytesToHex(
-                        Crypto.hmacSha256(key, nonce)
-                    )
-                    val keyHex = Crypto.bytesToHex(key)
-
+                message.startsWith("PROVISION_OK|") -> {
+                    log("Provisionamento concluído; aguardando desafio HMAC.")
                     listener.onLinkState(
                         LinkState.Authenticating,
-                        if (provisionNodeId == null)
-                            "Provisionando chave privada..."
-                        else
-                            "Provisionando identidade do nó..."
+                        "Chave provisionada • autenticando..."
                     )
+                }
 
-                    log(
-                        if (provisionNodeId == null)
-                            "Provisionamento legado iniciado pelo BLE criptografado."
-                        else
-                            "Chave independente derivada para o nó $provisionNodeId."
-                    )
-
-                    enqueueText(
-                        controlChar,
-                        "PROVISION|$keyHex|$proof"
-                    )
-                }.onFailure {
+                message.startsWith("PROVISION_LOCKED|") -> {
                     listener.onLinkState(
                         LinkState.Error,
-                        "Falha no provisionamento"
-                    )
-                    log(
-                        "Provisionamento inválido: ${it.message}"
+                        "Janela de provisionamento encerrada • reinicie o ESP32"
                     )
                 }
-            }
 
-            message.startsWith("PROVISION_OK|") -> {
-                log(
-                    "ESP32-S3 provisionado. Aguardando novo desafio HMAC..."
-                )
-                listener.onLinkState(
-                    LinkState.Authenticating,
-                    "Chave provisionada • autenticando..."
-                )
-            }
-
-            message.startsWith("PROVISION_LOCKED|") -> {
-                listener.onLinkState(
-                    LinkState.Error,
-                    "Janela de provisionamento encerrada • reinicie o ESP32-S3"
-                )
-                log(
-                    "Provisionamento bloqueado pelo firmware até o próximo reboot."
-                )
-            }
-
-            message.startsWith("PROVISION_ERROR|") -> {
-                listener.onLinkState(
-                    LinkState.Error,
-                    "ESP32-S3 recusou o provisionamento"
-                )
-                log(message)
-            }
-
-            message == "ERR|link_not_encrypted" -> {
-                listener.onLinkState(
-                    LinkState.Error,
-                    "Link BLE não criptografado • refaça o pareamento"
-                )
-                log(
-                    "O ESP32 recusou a operação porque o link BLE não estava criptografado."
-                )
-            }
-
-            message.startsWith("HELLO2|") -> {
-                legacySession = false
-                migrationRequested = false
-                val masterKey = privateKey ?: return
-                val parts = message.split("|")
-
-                if (parts.size < 3) {
-                    log("HELLO2 inválido.")
-                    return
+                message.startsWith("PROVISION_ERROR|") -> {
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "ESP32 recusou o provisionamento"
+                    )
+                    log(message)
                 }
 
-                val receivedNodeId = parts[1].trim()
-                val nonceText = parts[2].trim()
-                nodeId = receivedNodeId
-
-                val key = Crypto.deriveNodeKey(
-                    masterKey,
-                    receivedNodeId
-                )
-
-                sessionKey = key
-
-                runCatching {
-                    val nonce = Crypto.hexToBytes(nonceText)
-                    val mac = Crypto.bytesToHex(
-                        Crypto.hmacSha256(key, nonce)
-                    )
-
-                    enqueueText(
-                        controlChar,
-                        "AUTH|$mac"
-                    )
-                }.onFailure {
-                    log(
-                        "HELLO2 inválido: ${it.message}"
+                message == "ERR|link_not_encrypted" -> {
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Link BLE não criptografado • refaça o pareamento"
                     )
                 }
-            }
 
-            message.startsWith("HELLO|") -> {
-                legacySession = true
-                migrationRequested = false
-                val key = privateKey ?: return
-                sessionKey = key
-                val nonceText = message.substringAfter("HELLO|").trim()
+                message.startsWith("HELLO2|") ->
+                    handleHello2(message)
 
-                runCatching {
-                    val nonce = Crypto.hexToBytes(nonceText)
-                    val mac = Crypto.bytesToHex(
-                        Crypto.hmacSha256(key, nonce)
-                    )
-                    enqueueText(
-                        controlChar,
-                        "AUTH|$mac"
-                    )
-                }.onFailure {
-                    log(
-                        "HELLO inválido: ${it.message}"
+                message.startsWith("HELLO|") ->
+                    handleLegacyHello(message)
+
+                message.startsWith("AUTH_OK|") ->
+                    handleAuthOk(message)
+
+                message.startsWith("AUTH_FAIL|") -> {
+                    authenticated = false
+                    listener.onAuthenticated(false)
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Chave privada rejeitada"
                     )
                 }
-            }
 
-            message.startsWith("AUTH_OK|") -> {
-                val parts = message.split("|")
-                if (parts.size >= 3 && parts[2].isNotBlank()) {
-                    nodeId = parts[2].trim()
+                message.startsWith("TEL|") -> {
+                    listener.onTelemetry(
+                        parseTelemetry(message)
+                    )
                 }
 
-                authenticated = true
-                authGeneration++
-                listener.onAuthenticated(true)
-                listener.onLinkState(
-                    LinkState.Ready,
-                    "Canal privado autenticado"
-                )
-
-                enqueueText(controlChar, "INFO")
-                enqueueText(controlChar, "STATUS")
-            }
-
-            message.startsWith("AUTH_FAIL|") -> {
-                authenticated = false
-                listener.onAuthenticated(false)
-                listener.onLinkState(LinkState.Error, "Chave privada rejeitada")
-            }
-
-            message.startsWith("TEL|") -> {
-                listener.onTelemetry(parseTelemetry(message))
-            }
-
-            message.startsWith("INFO|") -> {
-                val info = parseNodeInfo(message)
-                listener.onNodeInfo(info)
-                maybeMigrateLegacyKey(info)
-            }
-
-            message.startsWith("KEY_MIGRATE_OK|") -> {
-                val migratedNodeId =
-                    message.substringAfter("KEY_MIGRATE_OK|").trim()
-
-                if (migratedNodeId.isNotBlank()) {
-                    nodeId = migratedNodeId
+                message.startsWith("INFO|") -> {
+                    val info = parseNodeInfo(message)
+                    listener.onNodeInfo(info)
+                    maybeMigrateLegacyKey(info)
                 }
 
-                legacySession = false
-                migrationRequested = false
+                message.startsWith("KEY_MIGRATE_OK|") ->
+                    handleKeyMigrationOk(message)
 
-                val masterKey = privateKey
-                val id = nodeId
-
-                if (
-                    masterKey != null &&
-                    !id.isNullOrBlank()
-                ) {
-                    sessionKey =
-                        Crypto.deriveNodeKey(
-                            masterKey,
-                            id
-                        )
+                message.startsWith("KEY_MIGRATE_ERROR|") -> {
+                    migrationRequested = false
+                    log(message)
                 }
 
-                log(
-                    "Chave legada migrada para credencial independente do nó."
-                )
-                listener.onLinkState(
-                    LinkState.Authenticating,
-                    "Credencial do nó atualizada • reautenticando..."
-                )
-            }
+                message.startsWith("FAST_OTA_READY|") &&
+                    awaitingFastOta ->
+                    handleFastOtaReady(message)
 
-            message.startsWith("KEY_MIGRATE_ERROR|") -> {
-                migrationRequested = false
-                log(message)
-            }
-
-            message.startsWith("FAST_OTA_READY|") && awaitingFastOta -> {
-                awaitingFastOta = false
-                fastOtaRequestGeneration++
-
-                val parts = message.split("|")
-
-                if (parts.size < 8) {
+                message.startsWith("FAST_OTA_ERROR|") &&
+                    awaitingFastOta -> {
+                    awaitingFastOta = false
+                    fastOtaRequestGeneration++
                     listener.onFastOtaUnavailable(
-                        "Resposta FAST_OTA inválida."
+                        message.substringAfter(
+                            "FAST_OTA_ERROR|"
+                        )
                     )
-                } else {
-                    val credentials = FastOtaCredentials(
-                        ssid = parts[1],
-                        password = parts[2],
-                        tokenHex = parts[3],
-                        host = parts[4],
-                        port = parts[5].toIntOrNull() ?: Protocol.FAST_OTA_PORT,
-                        channel = parts[6].toIntOrNull() ?: 6,
-                        hidden = parts[7] == "1"
-                    )
-
-                    log(
-                        "Sessão Fast OTA criada • canal ${credentials.channel} • " +
-                            "rede temporária protegida."
-                    )
-
-                    listener.onFastOtaReady(credentials)
                 }
-            }
 
-            message.startsWith("FAST_OTA_ERROR|") && awaitingFastOta -> {
-                awaitingFastOta = false
-                fastOtaRequestGeneration++
-                listener.onFastOtaUnavailable(
-                    message.substringAfter("FAST_OTA_ERROR|")
-                )
-            }
+                message == "ERR|unknown_command" &&
+                    awaitingFastOta -> {
+                    awaitingFastOta = false
+                    fastOtaRequestGeneration++
+                    listener.onFastOtaUnavailable(
+                        "Fast OTA não existe neste firmware; usando BLE compatível."
+                    )
+                }
 
-            message == "ERR|unknown_command" && awaitingFastOta -> {
-                awaitingFastOta = false
-                fastOtaRequestGeneration++
-                listener.onFastOtaUnavailable(
-                    "Fast OTA não existe neste firmware; usando BLE compatível."
-                )
-            }
+                message.startsWith("OTA_READY|") &&
+                    waitingOtaReady -> {
+                    waitingOtaReady = false
+                    otaOffset = 0
+                    listener.onLinkState(
+                        LinkState.Updating,
+                        "Enviando firmware..."
+                    )
+                    sendNextOtaChunk()
+                }
 
-            message.startsWith("OTA_READY|") && waitingOtaReady -> {
-                waitingOtaReady = false
-                otaOffset = 0
-                listener.onLinkState(LinkState.Updating, "Enviando firmware...")
-                handler.post { sendNextOtaChunk() }
-            }
+                message.startsWith("OTA_PROGRESS|") ->
+                    handleOtaProgress(message)
 
-            message.startsWith("OTA_PROGRESS|") -> {
-                val parts = message.split("|")
-                if (parts.size >= 3) {
-                    val done = parts[1].toLongOrNull() ?: 0
-                    val total = parts[2].toLongOrNull() ?: 1
+                message.startsWith("OTA_OK|") -> {
+                    otaActive = false
+                    waitingOtaReady = false
                     listener.onOtaProgress(
-                        (done.toFloat() / total.coerceAtLeast(1)).coerceIn(0f, 1f),
+                        1f,
                         otaFileName
                     )
+                    listener.onLinkState(
+                        LinkState.Ready,
+                        "Firmware validado • nó reiniciando"
+                    )
+                    log("OTA concluída com sucesso.")
+                }
+
+                message.startsWith("OTA_ERROR|") -> {
+                    failOta(
+                        message.substringAfter(
+                            "OTA_ERROR|"
+                        )
+                    )
+                }
+            }
+        }.onFailure { error ->
+            log(
+                "Mensagem do protocolo rejeitada: " +
+                    error.javaClass.simpleName + ": " +
+                    (error.message ?: "")
+            )
+            listener.onLinkState(
+                LinkState.Error,
+                "Resposta inválida recebida do nó"
+            )
+        }
+    }
+
+    private fun handleProvisionRequired(
+        message: String
+    ) {
+        val masterKey = privateKey
+            ?: error("Chave mestre ausente")
+
+        val parts = message.split("|")
+        require(parts.size >= 3) {
+            "PROVISION_REQUIRED incompleto"
+        }
+
+        val isMultiNode = parts.size >= 4
+        val provisionNodeId =
+            if (isMultiNode) {
+                parts[2].trim()
+            } else {
+                null
+            }
+
+        val nonceText =
+            if (isMultiNode) {
+                parts[3].trim()
+            } else {
+                parts[2].trim()
+            }
+
+        val key =
+            if (provisionNodeId.isNullOrBlank()) {
+                masterKey
+            } else {
+                nodeId = provisionNodeId
+                Crypto.deriveNodeKey(
+                    masterKey,
+                    provisionNodeId
+                ).also {
+                    sessionKey = it
                 }
             }
 
-            message.startsWith("OTA_OK|") -> {
-                otaActive = false
-                waitingOtaReady = false
-                listener.onOtaProgress(1f, otaFileName)
-                listener.onLinkState(LinkState.Ready, "Firmware validado • reiniciando nó")
-                log("OTA concluída com sucesso.")
-            }
+        val nonce =
+            Crypto.hexToBytes(nonceText)
 
-            message.startsWith("OTA_ERROR|") -> {
-                failOta(message.substringAfter("OTA_ERROR|"))
+        val proof =
+            Crypto.bytesToHex(
+                Crypto.hmacSha256(
+                    key,
+                    nonce
+                )
+            )
+
+        listener.onLinkState(
+            LinkState.Authenticating,
+            if (provisionNodeId == null) {
+                "Provisionando chave privada..."
+            } else {
+                "Provisionando identidade do nó..."
             }
+        )
+
+        writeControl(
+            "PROVISION|" +
+                Crypto.bytesToHex(key) +
+                "|" +
+                proof
+        )
+    }
+
+    private fun handleHello2(
+        message: String
+    ) {
+        legacySession = false
+        migrationRequested = false
+
+        val masterKey = privateKey
+            ?: error("Chave mestre ausente")
+
+        val parts = message.split("|")
+        require(parts.size >= 3) {
+            "HELLO2 incompleto"
         }
+
+        val receivedNodeId =
+            parts[1].trim()
+
+        val nonceText =
+            parts[2].trim()
+
+        require(receivedNodeId.isNotEmpty()) {
+            "node_id vazio"
+        }
+
+        nodeId = receivedNodeId
+
+        val key =
+            Crypto.deriveNodeKey(
+                masterKey,
+                receivedNodeId
+            )
+
+        sessionKey = key
+
+        val nonce =
+            Crypto.hexToBytes(nonceText)
+
+        val mac =
+            Crypto.bytesToHex(
+                Crypto.hmacSha256(
+                    key,
+                    nonce
+                )
+            )
+
+        writeControl("AUTH|" + mac)
+    }
+
+    private fun handleLegacyHello(
+        message: String
+    ) {
+        legacySession = true
+        migrationRequested = false
+
+        val key = privateKey
+            ?: error("Chave mestre ausente")
+
+        sessionKey = key
+
+        val nonce =
+            Crypto.hexToBytes(
+                message
+                    .substringAfter("HELLO|")
+                    .trim()
+            )
+
+        val mac =
+            Crypto.bytesToHex(
+                Crypto.hmacSha256(
+                    key,
+                    nonce
+                )
+            )
+
+        writeControl("AUTH|" + mac)
+    }
+
+    private fun handleAuthOk(
+        message: String
+    ) {
+        val parts = message.split("|")
+
+        if (
+            parts.size >= 3 &&
+            parts[2].isNotBlank()
+        ) {
+            nodeId = parts[2].trim()
+        }
+
+        authenticated = true
+        authGeneration++
+        listener.onAuthenticated(true)
+        listener.onLinkState(
+            LinkState.Ready,
+            "Canal privado autenticado"
+        )
+
+        writeControl("INFO")
+        writeControl("STATUS")
+    }
+
+    private fun handleKeyMigrationOk(
+        message: String
+    ) {
+        val migratedNodeId =
+            message
+                .substringAfter(
+                    "KEY_MIGRATE_OK|"
+                )
+                .trim()
+
+        if (migratedNodeId.isNotBlank()) {
+            nodeId = migratedNodeId
+        }
+
+        legacySession = false
+        migrationRequested = false
+
+        val masterKey = privateKey
+        val id = nodeId
+
+        if (
+            masterKey != null &&
+            !id.isNullOrBlank()
+        ) {
+            sessionKey =
+                Crypto.deriveNodeKey(
+                    masterKey,
+                    id
+                )
+        }
+
+        log(
+            "Credencial legada migrada para chave independente do nó."
+        )
+        listener.onLinkState(
+            LinkState.Authenticating,
+            "Credencial do nó atualizada • reautenticando..."
+        )
+    }
+
+    private fun handleFastOtaReady(
+        message: String
+    ) {
+        awaitingFastOta = false
+        fastOtaRequestGeneration++
+
+        val parts = message.split("|")
+
+        if (parts.size < 8) {
+            listener.onFastOtaUnavailable(
+                "Resposta FAST_OTA inválida."
+            )
+            return
+        }
+
+        val credentials =
+            FastOtaCredentials(
+                ssid = parts[1],
+                password = parts[2],
+                tokenHex = parts[3],
+                host = parts[4],
+                port =
+                    parts[5].toIntOrNull()
+                        ?: Protocol.FAST_OTA_PORT,
+                channel =
+                    parts[6].toIntOrNull()
+                        ?: 6,
+                hidden =
+                    parts[7] == "1"
+            )
+
+        log(
+            "Fast OTA criada • canal " +
+                credentials.channel + "."
+        )
+
+        listener.onFastOtaReady(credentials)
+    }
+
+    private fun handleOtaProgress(
+        message: String
+    ) {
+        val parts = message.split("|")
+        if (parts.size < 3) return
+
+        val done =
+            parts[1].toLongOrNull()
+                ?: return
+
+        val total =
+            parts[2].toLongOrNull()
+                ?.coerceAtLeast(1)
+                ?: return
+
+        listener.onOtaProgress(
+            (
+                done.toFloat() /
+                    total.toFloat()
+                ).coerceIn(0f, 1f),
+            otaFileName
+        )
     }
 
     private fun maybeMigrateLegacyKey(
@@ -908,8 +858,13 @@ class PrivateLinkBleManager(
             return
         }
 
-        val masterKey = privateKey ?: return
-        val id = info.nodeId ?: nodeId ?: return
+        val masterKey =
+            privateKey ?: return
+
+        val id =
+            info.nodeId
+                ?: nodeId
+                ?: return
 
         val derived =
             Crypto.deriveNodeKey(
@@ -919,31 +874,25 @@ class PrivateLinkBleManager(
 
         migrationRequested = true
 
-        enqueueText(
-            controlChar,
+        writeControl(
             "KEY_MIGRATE|" +
                 Crypto.bytesToHex(derived)
         )
 
         log(
-            "Migrando credencial legada para chave exclusiva do nó $id."
+            "Migrando credencial legada para chave exclusiva do nó " +
+                id + "."
         )
     }
 
-    private fun parseNodeInfo(message: String): NodeInfo {
-        val map = buildMap {
-            message.split("|").drop(1).forEach { field ->
-                val index = field.indexOf('=')
-                if (index > 0) {
-                    put(
-                        field.substring(0, index),
-                        field.substring(index + 1)
-                    )
-                }
-            }
-        }
+    private fun parseNodeInfo(
+        message: String
+    ): NodeInfo {
+        val map = parseFields(message)
 
-        val parsedNodeId = map["node_id"]
+        val parsedNodeId =
+            map["node_id"]
+
         if (!parsedNodeId.isNullOrBlank()) {
             nodeId = parsedNodeId
         }
@@ -953,71 +902,142 @@ class PrivateLinkBleManager(
             model = map["model"],
             board = map["board"],
             role = map["role"],
-            firmware = map["fw"] ?: "-",
-            flashBytes = map["flash_bytes"]?.toLongOrNull(),
-            capabilities = map["caps"]
-                ?.split(",")
-                ?.map { it.trim() }
-                ?.filter { it.isNotEmpty() }
-                ?.toSet()
-                ?: emptySet()
+            firmware =
+                map["fw"] ?: "-",
+            flashBytes =
+                map["flash_bytes"]
+                    ?.toLongOrNull(),
+            capabilities =
+                map["caps"]
+                    ?.split(",")
+                    ?.map { it.trim() }
+                    ?.filter { it.isNotEmpty() }
+                    ?.toSet()
+                    ?: emptySet()
         )
     }
 
-    private fun parseTelemetry(message: String): Telemetry {
-        val map = buildMap {
-            message.split("|").drop(1).forEach { field ->
-                val index = field.indexOf('=')
-                if (index > 0) {
-                    put(field.substring(0, index), field.substring(index + 1))
-                }
-            }
-        }
+    private fun parseTelemetry(
+        message: String
+    ): Telemetry {
+        val map = parseFields(message)
 
         return Telemetry(
-            firmware = map["fw"] ?: "-",
-            nodeId = map["node_id"],
-            model = map["model"],
-            role = map["role"],
-            flashBytes = map["flash_bytes"]?.toLongOrNull(),
-            uptimeMs = map["uptime_ms"]?.toLongOrNull(),
-            heap = map["heap"]?.toLongOrNull(),
-            batteryVolts = map["battery_v"] ?: "na",
-            otaActive = map["ota"] == "1",
-            fastOtaActive = map["fast_ota"] == "1",
-            wifiAp = map["wifi_ap"]?.toIntOrNull(),
-            wifiOpen = map["wifi_open"]?.toIntOrNull(),
-            wifiSecure = map["wifi_secure"]?.toIntOrNull(),
-            wifiBest = map["wifi_best"]?.toIntOrNull(),
-            wifiPeakChannel = map["wifi_peak_ch"]?.toIntOrNull(),
-            wifiPeakCount = map["wifi_peak_n"]?.toIntOrNull(),
-            bleSeen = map["ble_seen"]?.toIntOrNull(),
-            bleBest = map["ble_best"]?.toIntOrNull(),
-            surveyAgeMs = map["survey_age_ms"]?.toLongOrNull()
+            firmware =
+                map["fw"] ?: "-",
+            nodeId =
+                map["node_id"],
+            model =
+                map["model"],
+            role =
+                map["role"],
+            flashBytes =
+                map["flash_bytes"]
+                    ?.toLongOrNull(),
+            uptimeMs =
+                map["uptime_ms"]
+                    ?.toLongOrNull(),
+            heap =
+                map["heap"]
+                    ?.toLongOrNull(),
+            batteryVolts =
+                map["battery_v"]
+                    ?: "na",
+            otaActive =
+                map["ota"] == "1",
+            fastOtaActive =
+                map["fast_ota"] == "1",
+            wifiAp =
+                map["wifi_ap"]
+                    ?.toIntOrNull(),
+            wifiOpen =
+                map["wifi_open"]
+                    ?.toIntOrNull(),
+            wifiSecure =
+                map["wifi_secure"]
+                    ?.toIntOrNull(),
+            wifiBest =
+                map["wifi_best"]
+                    ?.toIntOrNull(),
+            wifiPeakChannel =
+                map["wifi_peak_ch"]
+                    ?.toIntOrNull(),
+            wifiPeakCount =
+                map["wifi_peak_n"]
+                    ?.toIntOrNull(),
+            bleSeen =
+                map["ble_seen"]
+                    ?.toIntOrNull(),
+            bleBest =
+                map["ble_best"]
+                    ?.toIntOrNull(),
+            surveyAgeMs =
+                map["survey_age_ms"]
+                    ?.toLongOrNull()
         )
     }
 
-    private fun sendNextOtaChunk() {
-        val firmware = otaFirmware
-        val characteristic = otaChar
+    private fun parseFields(
+        message: String
+    ): Map<String, String> =
+        buildMap {
+            message
+                .split("|")
+                .drop(1)
+                .forEach { field ->
+                    val index =
+                        field.indexOf('=')
 
-        if (!otaActive || firmware == null || characteristic == null) return
+                    if (index > 0) {
+                        put(
+                            field.substring(
+                                0,
+                                index
+                            ),
+                            field.substring(
+                                index + 1
+                            )
+                        )
+                    }
+                }
+        }
+
+    private fun sendNextOtaChunk() {
+        val firmware =
+            otaFirmware ?: return
+
+        if (!otaActive) return
 
         if (otaOffset >= firmware.size) {
-            listener.onLinkState(LinkState.Updating, "Validando firmware no nó...")
-            enqueueText(controlChar, "OTA_END")
+            listener.onLinkState(
+                LinkState.Updating,
+                "Validando firmware no nó..."
+            )
+            writeControl("OTA_END")
             return
         }
 
-        val end = (otaOffset + Protocol.BLE_OTA_CHUNK).coerceAtMost(firmware.size)
-        val chunk = firmware.copyOfRange(otaOffset, end)
+        val end =
+            (otaOffset + Protocol.BLE_OTA_CHUNK)
+                .coerceAtMost(
+                    firmware.size
+                )
 
-        enqueueWrite(characteristic, chunk) {
+        val chunk =
+            firmware.copyOfRange(
+                otaOffset,
+                end
+            )
+
+        session?.writeOta(chunk) {
             otaOffset = end
+
             listener.onOtaProgress(
-                otaOffset.toFloat() / firmware.size.toFloat(),
+                otaOffset.toFloat() /
+                    firmware.size.toFloat(),
                 otaFileName
             )
+
             sendNextOtaChunk()
         }
     }
@@ -1025,470 +1045,274 @@ class PrivateLinkBleManager(
     private fun failOta(reason: String) {
         otaActive = false
         waitingOtaReady = false
+
         listener.onLinkState(
-            if (authenticated) LinkState.Ready else LinkState.Error,
-            if (authenticated) "Canal privado autenticado" else "Falha OTA"
+            if (authenticated) {
+                LinkState.Ready
+            } else {
+                LinkState.Error
+            },
+            if (authenticated) {
+                "Canal privado autenticado"
+            } else {
+                "Falha OTA"
+            }
         )
-        listener.onOtaProgress(0f, otaFileName)
-        log("OTA falhou: $reason")
+
+        listener.onOtaProgress(
+            0f,
+            otaFileName
+        )
+
+        log("OTA falhou: " + reason)
     }
 
-    private fun enqueueText(
-        characteristic: BluetoothGattCharacteristic?,
+    private fun writeControl(
         text: String,
         onSuccess: (() -> Unit)? = null
     ) {
-        characteristic ?: return
-        enqueueWrite(characteristic, text.toByteArray(StandardCharsets.UTF_8), onSuccess)
+        session?.writeControl(
+            text.toByteArray(
+                StandardCharsets.UTF_8
+            ),
+            onSuccess
+        )
     }
 
-    private fun enqueueWrite(
-        characteristic: BluetoothGattCharacteristic,
-        payload: ByteArray,
-        onSuccess: (() -> Unit)? = null
-    ) {
-        synchronized(writes) {
-            writes.addLast(WriteTask(characteristic, payload, onSuccess))
-        }
-        pumpWrites()
+    private fun resetProtocolState() {
+        authenticated = false
+        listener.onAuthenticated(false)
+
+        sessionKey = null
+        nodeId = null
+        legacySession = false
+        migrationRequested = false
+        authGeneration++
+
+        otaActive = false
+        otaFirmware = null
+        otaFileName = null
+        otaOffset = 0
+        waitingOtaReady = false
+
+        awaitingFastOta = false
+        fastOtaRequestGeneration++
     }
 
-    private fun pumpWrites() {
-        val localGatt = gatt
-        if (localGatt == null || !connected || !hasBlePermissions()) return
-
-        val task: WriteTask = synchronized(writes) {
-            if (writing || writes.isEmpty()) return
-            writing = true
-            writes.first()
+    private fun stopScanInternal() {
+        if (scanning && hasBlePermissions()) {
+            runCatching {
+                scanner?.stopScan(scanCallback)
+            }.onFailure { error ->
+                log(
+                    "stopScan: " +
+                        error.javaClass.simpleName + ": " +
+                        (error.message ?: "")
+                )
+            }
         }
 
-        val status: Int
-        val started: Boolean
+        scanning = false
+        scanner = null
+    }
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            status = localGatt.writeCharacteristic(
-                task.characteristic,
-                task.payload,
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            )
-            started = status == BluetoothStatusCodes.SUCCESS
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            runGuarded(block)
         } else {
-            @Suppress("DEPRECATION")
-            task.characteristic.writeType =
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            @Suppress("DEPRECATION")
-            task.characteristic.value = task.payload
-            @Suppress("DEPRECATION")
-            started = localGatt.writeCharacteristic(task.characteristic)
-            status = if (started) 0 else -1
-        }
-
-        if (!started) {
-            task.attempts++
-            synchronized(writes) {
-                writing = false
+            main.post {
+                runGuarded(block)
             }
+        }
+    }
 
+    private fun runGuarded(block: () -> Unit) {
+        runCatching(block).onFailure { error ->
             log(
-                "Write BLE ocupado/recusado. código=$status " +
-                    "tentativa=${task.attempts}/${Protocol.MAX_WRITE_RETRIES}"
+                "Exceção contida: " +
+                    error.javaClass.simpleName + ": " +
+                    (error.message ?: "")
             )
 
-            if (task.attempts >= Protocol.MAX_WRITE_RETRIES) {
-                synchronized(writes) {
-                    if (writes.isNotEmpty()) writes.removeFirst()
-                }
-
-                if (otaActive) {
-                    failOta("BLE recusou escrita • código $status")
-                } else if (!authenticated) {
-                    listener.onLinkState(
-                        LinkState.Error,
-                        "Falha BLE antes do HELLO • código $status"
-                    )
-                }
-                return
-            }
-
-            handler.postDelayed(
-                { pumpWrites() },
-                (180L * task.attempts).coerceAtMost(1800L)
+            listener.onLinkState(
+                LinkState.Error,
+                "Falha interna do ESPhub"
             )
         }
     }
 
     private fun log(message: String) {
-        val stamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        listener.onLog("[$stamp] $message")
+        val stamp =
+            SimpleDateFormat(
+                "HH:mm:ss",
+                Locale.getDefault()
+            ).format(Date())
+
+        listener.onLog(
+            "[" + stamp + "] " + message
+        )
     }
 
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult?) {
-            result ?: return
-            if (result.rssi < Protocol.MIN_RSSI) return
-
-            val address = result.device.address
-            scanResults[address] = result
-
-            val devices = scanResults.values
-                .map {
-                    NearbyDevice(
-                        device = it.device,
-                        address = it.device.address,
-                        rssi = it.rssi
-                    )
-                }
-                .sortedByDescending { it.rssi }
-
-            listener.onDevices(devices)
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            scanning = false
-            listener.onLinkState(LinkState.Error, "Falha no scan BLE • $errorCode")
-            log("Scan BLE falhou: $errorCode")
-        }
-    }
-
-    private val bondReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            runCatching {
-                handleBondIntent(intent)
-            }.onFailure { error ->
-                listener.onLinkState(
-                    LinkState.Error,
-                    "Falha ao processar pareamento BLE"
-                )
-                log(
-                    "Bond receiver protegido: ${error.javaClass.simpleName}: ${error.message}"
-                )
-            }
-        }
-    }
-
-    private fun handleBondIntent(intent: Intent?) {
-            if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
-
-            val device = if (Build.VERSION.SDK_INT >= 33) {
-                intent.getParcelableExtra(
-                    BluetoothDevice.EXTRA_DEVICE,
-                    BluetoothDevice::class.java
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-            } ?: return
-
-            val pending = pendingBondDevice ?: return
-            if (device.address != pending.address) return
-
-            when (
-                intent.getIntExtra(
-                    BluetoothDevice.EXTRA_BOND_STATE,
-                    BluetoothDevice.ERROR
-                )
+    private val scanCallback =
+        object : ScanCallback() {
+            override fun onScanResult(
+                callbackType: Int,
+                result: ScanResult?
             ) {
-                BluetoothDevice.BOND_BONDING -> {
-                    awaitingBond = true
-                    listener.onLinkState(
-                        LinkState.Pairing,
-                        "Aguardando confirmação do pareamento..."
-                    )
-                    log("Android informou BOND_BONDING.")
-                }
+                if (result == null) return
 
-                BluetoothDevice.BOND_BONDED -> {
-                    awaitingBond = false
-                    bondGeneration++
-                    log("Pareamento concluído.")
-
-                    if (manualDisconnect) {
-                        log(
-                            "Pareamento terminou após desconexão manual; reconexão cancelada."
-                        )
-                        return
-                    }
-
-                    val activeGatt = gatt
-
+                onMain {
                     if (
-                        connected &&
-                        activeGatt != null &&
-                        activeGatt.device.address == device.address
+                        !scanning ||
+                        result.rssi < Protocol.MIN_RSSI
                     ) {
-                        continueGattSetup(activeGatt)
-                    } else {
-                        log(
-                            "Pareamento concluído após desconexão; reconectando GATT."
-                        )
-                        handler.postDelayed({
-                            if (!manualDisconnect) {
-                                connectGatt(device)
-                            }
-                        }, 500)
+                        return@onMain
                     }
-                }
 
-                BluetoothDevice.BOND_NONE -> {
-                    if (awaitingBond) {
-                        awaitingBond = false
-                        bondGeneration++
-                        listener.onLinkState(
-                            LinkState.Error,
-                            "Pareamento cancelado ou rejeitado"
-                        )
-                        log(
-                            "Pareamento não concluído. Confirme o diálogo do Android e use o código ${Protocol.PAIRING_PASSKEY}."
-                        )
-                    }
+                    val address =
+                        runCatching {
+                            result.device.address
+                        }.getOrNull()
+                            ?: return@onMain
+
+                    scanResults[address] = result
+
+                    val devices =
+                        scanResults
+                            .values
+                            .mapNotNull {
+                                runCatching {
+                                    NearbyDevice(
+                                        device = it.device,
+                                        address =
+                                            it.device.address,
+                                        rssi = it.rssi
+                                    )
+                                }.getOrNull()
+                            }
+                            .sortedByDescending {
+                                it.rssi
+                            }
+
+                    listener.onDevices(devices)
                 }
             }
-        }
 
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(
-            bluetoothGatt: BluetoothGatt,
-            status: Int,
-            newState: Int
-        ) {
-            runCatching {
-                handleConnectionStateChange(
-                    bluetoothGatt,
-                    status,
-                    newState
-                )
-            }.onFailure { error ->
-                connected = false
-                authenticated = false
-                listener.onAuthenticated(false)
+            override fun onScanFailed(
+                errorCode: Int
+            ) = onMain {
+                scanning = false
+                scanner = null
+
                 listener.onLinkState(
                     LinkState.Error,
-                    "Falha interna na sessão BLE"
+                    "Falha no scan BLE • " +
+                        errorCode
                 )
+
                 log(
-                    "onConnectionStateChange protegido: ${error.javaClass.simpleName}: ${error.message}"
+                    "Scan BLE falhou: " +
+                        errorCode
                 )
-                runCatching {
-                    bluetoothGatt.disconnect()
-                }
             }
         }
 
-        private fun handleConnectionStateChange(
-            bluetoothGatt: BluetoothGatt,
-            status: Int,
-            newState: Int
+    private inner class SessionListener :
+        BleSessionController.Listener {
+
+        override fun onStatus(text: String) {
+            val state =
+                when {
+                    text.contains(
+                        "Pareando",
+                        ignoreCase = true
+                    ) ||
+                    text.contains(
+                        "pareamento",
+                        ignoreCase = true
+                    ) ->
+                        LinkState.Pairing
+
+                    text.contains(
+                        "autentic",
+                        ignoreCase = true
+                    ) ->
+                        LinkState.Authenticating
+
+                    text.contains(
+                        "erro",
+                        ignoreCase = true
+                    ) ->
+                        LinkState.Error
+
+                    else ->
+                        LinkState.Connecting
+                }
+
+            listener.onLinkState(
+                state,
+                text
+            )
+        }
+
+        override fun onLog(message: String) {
+            log(message)
+        }
+
+        override fun onAddress(address: String?) {
+            listener.onConnectedAddress(address)
+        }
+
+        override fun onTransportReady() {
+            beginAuthentication()
+        }
+
+        override fun onNotification(value: ByteArray) {
+            handleNotification(value)
+        }
+
+        override fun onDisconnected() {
+            authenticated = false
+            listener.onAuthenticated(false)
+            listener.onConnectedAddress(null)
+        }
+
+        override fun onFatalError(message: String) {
+            authenticated = false
+            listener.onAuthenticated(false)
+            listener.onLinkState(
+                LinkState.Error,
+                message
+            )
+        }
+
+        override fun onWriteFailure(
+            channel: BleSessionController.Channel,
+            status: Int
         ) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                connected = true
-                servicesDiscoveryStarted = false
-                listener.onConnectedAddress(bluetoothGatt.device.address)
+            log(
+                "Write " +
+                    channel.name +
+                    " falhou após retries • " +
+                    status
+            )
+
+            if (
+                channel ==
+                    BleSessionController.Channel.OTA &&
+                otaActive
+            ) {
+                failOta(
+                    "BLE recusou escrita • " +
+                        status
+                )
+            } else if (!authenticated) {
                 listener.onLinkState(
-                    LinkState.Connecting,
-                    "BLE conectado • verificando segurança..."
+                    LinkState.Error,
+                    "Falha BLE durante autenticação • " +
+                        status
                 )
-                log("BLE conectado.")
-
-                if (hasBlePermissions()) {
-                    runCatching {
-                        beginBondingOnConnectedGatt(
-                            bluetoothGatt
-                        )
-                    }.onFailure { error ->
-                        listener.onLinkState(
-                            LinkState.Error,
-                            "Falha ao iniciar segurança BLE"
-                        )
-                        log(
-                            "Bonding protegido: ${error.javaClass.simpleName}: ${error.message}"
-                        )
-                        runCatching {
-                            bluetoothGatt.disconnect()
-                        }
-                    }
-                }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                connected = false
-                authenticated = false
-                servicesDiscoveryStarted = false
-                otaActive = false
-                listener.onAuthenticated(false)
-
-                val device = bluetoothGatt.device
-
-                if (
-                    awaitingBond &&
-                    device.bondState == BluetoothDevice.BOND_BONDING
-                ) {
-                    listener.onLinkState(
-                        LinkState.Pairing,
-                        "Pareamento em andamento..."
-                    )
-                    log(
-                        "GATT desconectou durante BOND_BONDING; aguardando resultado do sistema."
-                    )
-                } else if (
-                    !manualDisconnect &&
-                    device.bondState == BluetoothDevice.BOND_BONDED &&
-                    pendingBondDevice?.address == device.address
-                ) {
-                    listener.onLinkState(
-                        LinkState.Connecting,
-                        "Pareado • reconectando..."
-                    )
-                    log(
-                        "BLE desconectou após pareamento; reconexão automática."
-                    )
-
-                    handler.postDelayed({
-                        if (
-                            !connected &&
-                            !manualDisconnect
-                        ) {
-                            connectGatt(device)
-                        }
-                    }, 700)
-                } else {
-                    listener.onLinkState(
-                        LinkState.Idle,
-                        if (manualDisconnect)
-                            "Desconectado pelo usuário"
-                        else
-                            "BLE desconectado"
-                    )
-
-                    log(
-                        if (manualDisconnect)
-                            "BLE desconectado pelo usuário."
-                        else
-                            "BLE desconectado. status=$status"
-                    )
-                }
             }
-        }
-
-        override fun onMtuChanged(
-            bluetoothGatt: BluetoothGatt,
-            mtu: Int,
-            status: Int
-        ) {
-            log("MTU: $mtu")
-        }
-
-        override fun onServicesDiscovered(
-            bluetoothGatt: BluetoothGatt,
-            status: Int
-        ) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                log("Falha ao descobrir serviços: $status")
-                return
-            }
-
-            val service: BluetoothGattService =
-                bluetoothGatt.getService(Protocol.SERVICE_UUID)
-                    ?: run {
-                        log("Serviço PrivateLink não encontrado.")
-                        return
-                    }
-
-            controlChar = service.getCharacteristic(Protocol.CONTROL_UUID)
-            responseChar = service.getCharacteristic(Protocol.RESPONSE_UUID)
-            otaChar = service.getCharacteristic(Protocol.OTA_UUID)
-
-            if (
-                controlChar == null ||
-                responseChar == null ||
-                otaChar == null
-            ) {
-                log("Characteristics PrivateLink incompletas.")
-                return
-            }
-
-            if (!hasBlePermissions()) return
-
-            val response = responseChar ?: return
-            bluetoothGatt.setCharacteristicNotification(response, true)
-
-            val descriptor = response.getDescriptor(Protocol.CCCD_UUID)
-
-            if (descriptor == null) {
-                handler.postDelayed({ beginAuthentication() }, 1200)
-                return
-            }
-
-            val started = if (Build.VERSION.SDK_INT >= 33) {
-                bluetoothGatt.writeDescriptor(
-                    descriptor,
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                ) == BluetoothStatusCodes.SUCCESS
-            } else {
-                @Suppress("DEPRECATION")
-                descriptor.value =
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                @Suppress("DEPRECATION")
-                bluetoothGatt.writeDescriptor(descriptor)
-            }
-
-            if (!started) {
-                log("Descriptor CCCD não iniciou; tentando autenticar após espera.")
-                handler.postDelayed({ beginAuthentication() }, 1500)
-            }
-        }
-
-        override fun onDescriptorWrite(
-            bluetoothGatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int
-        ) {
-            if (descriptor.uuid == Protocol.CCCD_UUID) {
-                log("Notifications ativas. status=$status")
-                handler.postDelayed({ beginAuthentication() }, 1200)
-            }
-        }
-
-        override fun onCharacteristicChanged(
-            bluetoothGatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            if (characteristic.uuid == Protocol.RESPONSE_UUID) {
-                handleNotification(value)
-            }
-        }
-
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicChanged(
-            bluetoothGatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            if (
-                Build.VERSION.SDK_INT < 33 &&
-                characteristic.uuid == Protocol.RESPONSE_UUID
-            ) {
-                handleNotification(characteristic.value ?: return)
-            }
-        }
-
-        override fun onCharacteristicWrite(
-            bluetoothGatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            val completed: WriteTask? = synchronized(writes) {
-                val task = if (writes.isNotEmpty()) writes.removeFirst() else null
-                writing = false
-                task
-            }
-
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                log("Write BLE falhou. status=$status")
-                if (otaActive) failOta("Write GATT falhou • $status")
-            } else {
-                completed?.onSuccess?.let { handler.post(it) }
-            }
-
-            pumpWrites()
         }
     }
 }
