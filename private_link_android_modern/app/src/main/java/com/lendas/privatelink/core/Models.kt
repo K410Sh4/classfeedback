@@ -85,7 +85,7 @@ data class NodeState(
             info.model != null ->
                 info.model
             else ->
-                "PrivateLink Node"
+                "ESPhub Node"
         }
 
     val nodeKey: String
@@ -94,7 +94,7 @@ data class NodeState(
 
 data class PrivateLinkUiState(
     val scanning: Boolean = false,
-    val statusText: String = "Aguardando nós PrivateLink",
+    val statusText: String = "Aguardando nós ESPhub",
     val devices: List<NearbyDevice> = emptyList(),
     val nodes: List<NodeState> = emptyList(),
     val selectedNodeKey: String? = null,
