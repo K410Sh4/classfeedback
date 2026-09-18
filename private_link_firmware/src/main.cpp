@@ -557,6 +557,7 @@ void setup() {
     NimBLECharacteristic* control =
         service->createCharacteristic(
             CONTROL_UUID,
+            NIMBLE_PROPERTY::WRITE |
             NIMBLE_PROPERTY::WRITE_AUTHEN,
             512
         );
@@ -574,6 +575,7 @@ void setup() {
     NimBLECharacteristic* ota =
         service->createCharacteristic(
             OTA_UUID,
+            NIMBLE_PROPERTY::WRITE |
             NIMBLE_PROPERTY::WRITE_AUTHEN,
             512
         );
