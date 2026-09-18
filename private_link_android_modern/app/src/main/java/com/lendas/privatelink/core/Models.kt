@@ -60,6 +60,26 @@ enum class OtaTransport {
     WifiFast
 }
 
+data class LabStatus(
+    val state: String = "IDLE",
+    val level: Int = 0,
+    val target: String? = null,
+    val port: Int? = null,
+    val profilePps: Int? = null,
+    val packetBytes: Int? = null,
+    val txPackets: Long = 0L,
+    val txBytes: Long = 0L,
+    val actualPps: Int? = null,
+    val elapsedMs: Long = 0L,
+    val rssi: Int? = null,
+    val reason: String? = null
+) {
+    val active: Boolean
+        get() =
+            state == "CONNECTING" ||
+            state == "RUNNING"
+}
+
 data class NodeState(
     val address: String,
     val rssi: Int? = null,
@@ -74,6 +94,7 @@ data class NodeState(
     val otaSpeedBytesPerSecond: Long? = null,
     val otaTransferredBytes: Long = 0L,
     val otaTotalBytes: Long = 0L,
+    val lab: LabStatus = LabStatus(),
     val lastError: String? = null
 ) {
     val displayName: String
@@ -82,6 +103,9 @@ data class NodeState(
                 "nanoESP32-C6"
             info.model?.contains("S3", ignoreCase = true) == true ->
                 "ESP32-S3"
+            info.model?.contains("DEVKIT", ignoreCase = true) == true ||
+                info.model?.equals("ESP32", ignoreCase = true) == true ->
+                "ESP32 DevKit V1"
             info.model != null ->
                 info.model
             else ->
