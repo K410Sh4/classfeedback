@@ -6,7 +6,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.0"
 #define BLE_PASSKEY 496110
 
 static const char* SERVICE_UUID =
@@ -57,6 +57,17 @@ struct ResearchStats {
 };
 
 static ResearchStats gResearch;
+static uint16_t gWifiChannelCounts[14] = {0};
+
+static const uint16_t FAST_OTA_PORT = 3232;
+static const uint32_t FAST_OTA_TIMEOUT_MS = 120000;
+static WiFiServer gFastOtaServer(FAST_OTA_PORT);
+static bool gFastOtaActive = false;
+static uint32_t gFastOtaStartedAt = 0;
+static int gFastOtaChannel = 6;
+static String gFastOtaSsid;
+static String gFastOtaPassword;
+static uint8_t gFastOtaToken[32] = {0};
 
 static bool gOtaActive = false;
 static size_t gOtaSize = 0;
@@ -145,16 +156,41 @@ static void notifyText(const String& text) {
     gResponse->notify();
 }
 
-static void makeChallenge() {
-    for (size_t i = 0; i < sizeof(gChallenge); i += 4) {
+static void fillRandomBytes(uint8_t* data, size_t len) {
+    if (data == nullptr || len == 0) return;
+
+    for (size_t i = 0; i < len; i += 4) {
         uint32_t randomValue = esp_random();
         size_t amount = min(
             static_cast<size_t>(4),
-            sizeof(gChallenge) - i
+            len - i
         );
 
-        memcpy(gChallenge + i, &randomValue, amount);
+        memcpy(data + i, &randomValue, amount);
     }
+}
+
+static void makeChallenge() {
+    fillRandomBytes(gChallenge, sizeof(gChallenge));
+}
+
+static String randomAlphaNumeric(size_t len) {
+    static const char ALPHABET[] =
+        "ABCDEFGHJKLMNPQRSTUVWXYZ"
+        "abcdefghijkmnopqrstuvwxyz"
+        "23456789";
+
+    String out;
+    out.reserve(len);
+
+    for (size_t i = 0; i < len; ++i) {
+        uint32_t r = esp_random();
+        out += ALPHABET[
+            r % (sizeof(ALPHABET) - 1)
+        ];
+    }
+
+    return out;
 }
 
 static void hmacSha256(
@@ -372,7 +408,7 @@ static void finishOta() {
 }
 
 static void runWifiSurvey() {
-    if (gOtaActive) return;
+    if (gOtaActive || gFastOtaActive) return;
 
     wifi_scan_config_t config = {};
     config.ssid = nullptr;
@@ -399,6 +435,7 @@ static void runWifiSurvey() {
     gResearch.wifiPeakChannelCount = 0;
 
     int channelCounts[15] = {0};
+    memset(gWifiChannelCounts, 0, sizeof(gWifiChannelCounts));
 
     if (count > 0) {
         wifi_ap_record_t* records =
@@ -425,6 +462,7 @@ static void runWifiSurvey() {
 
                     if (ap.primary >= 1 && ap.primary <= 14) {
                         ++channelCounts[ap.primary];
+                        ++gWifiChannelCounts[ap.primary - 1];
                     }
                 }
 
@@ -444,7 +482,7 @@ static void runWifiSurvey() {
 }
 
 static void runBleSurvey() {
-    if (gOtaActive) return;
+    if (gOtaActive || gFastOtaActive) return;
 
     NimBLEScan* scan = NimBLEDevice::getScan();
 
@@ -476,7 +514,7 @@ static void runBleSurvey() {
 }
 
 static void runResearchSurvey() {
-    if (gOtaActive) return;
+    if (gOtaActive || gFastOtaActive) return;
 
     runWifiSurvey();
     delay(40);
@@ -504,6 +542,8 @@ static String telemetryText() {
     text += "|battery_v=na";
     text += "|ota=";
     text += gOtaActive ? "1" : "0";
+    text += "|fast_ota=";
+    text += gFastOtaActive ? "1" : "0";
 
     text += "|wifi_ap=" + String(gResearch.wifiApCount);
     text += "|wifi_open=" + String(gResearch.wifiOpenCount);
@@ -517,6 +557,403 @@ static String telemetryText() {
         String(gResearch.lastSurveyMs == 0 ? 0 : millis() - gResearch.lastSurveyMs);
 
     return text;
+}
+
+static int chooseFastOtaChannel() {
+    static const int candidates[] = {1, 6, 11};
+
+    int bestChannel = 6;
+    uint16_t bestCount = UINT16_MAX;
+
+    for (int channel : candidates) {
+        uint16_t count = gWifiChannelCounts[channel - 1];
+
+        if (count < bestCount) {
+            bestCount = count;
+            bestChannel = channel;
+        }
+    }
+
+    return bestChannel;
+}
+
+static void stopFastOtaSession() {
+    if (!gFastOtaActive) return;
+
+    gFastOtaServer.stop();
+    WiFi.softAPdisconnect(true);
+    delay(40);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false, false);
+
+    gFastOtaActive = false;
+    gFastOtaStartedAt = 0;
+    gFastOtaSsid = "";
+    gFastOtaPassword = "";
+    memset(gFastOtaToken, 0, sizeof(gFastOtaToken));
+
+    gLastResearchSurvey = millis();
+}
+
+static void failFastOtaClient(
+    WiFiClient& client,
+    const String& reason
+) {
+    Update.abort();
+    freeDigests();
+
+    client.print("ERROR|");
+    client.print(reason);
+    client.print("\n");
+    client.flush();
+
+    delay(50);
+    client.stop();
+
+    notifyText("FAST_OTA_ERROR|" + reason);
+    stopFastOtaSession();
+}
+
+static void startFastOtaSession() {
+    if (!gAuthenticated) {
+        notifyText("ERR|not_authenticated");
+        return;
+    }
+
+    if (gOtaActive || gFastOtaActive) {
+        notifyText("FAST_OTA_ERROR|busy");
+        return;
+    }
+
+    gFastOtaChannel = chooseFastOtaChannel();
+
+    uint8_t ssidEntropy[4];
+    fillRandomBytes(ssidEntropy, sizeof(ssidEntropy));
+
+    gFastOtaSsid =
+        "PL-" +
+        bytesToHex(ssidEntropy, sizeof(ssidEntropy));
+
+    gFastOtaPassword = randomAlphaNumeric(20);
+
+    fillRandomBytes(
+        gFastOtaToken,
+        sizeof(gFastOtaToken)
+    );
+
+    WiFi.mode(WIFI_AP_STA);
+
+    IPAddress localIp(192, 168, 4, 1);
+    IPAddress gateway(192, 168, 4, 1);
+    IPAddress subnet(255, 255, 255, 0);
+
+    if (!WiFi.softAPConfig(localIp, gateway, subnet)) {
+        notifyText("FAST_OTA_ERROR|ap_config");
+        WiFi.mode(WIFI_STA);
+        return;
+    }
+
+    const bool hiddenSsid = true;
+
+    if (!WiFi.softAP(
+            gFastOtaSsid.c_str(),
+            gFastOtaPassword.c_str(),
+            gFastOtaChannel,
+            hiddenSsid,
+            1
+        )) {
+        notifyText("FAST_OTA_ERROR|ap_start");
+        WiFi.mode(WIFI_STA);
+        return;
+    }
+
+    gFastOtaServer.begin();
+    gFastOtaServer.setNoDelay(true);
+
+    gFastOtaActive = true;
+    gFastOtaStartedAt = millis();
+
+    String response = "FAST_OTA_READY|";
+    response += gFastOtaSsid;
+    response += "|";
+    response += gFastOtaPassword;
+    response += "|";
+    response += bytesToHex(
+        gFastOtaToken,
+        sizeof(gFastOtaToken)
+    );
+    response += "|192.168.4.1|";
+    response += String(FAST_OTA_PORT);
+    response += "|";
+    response += String(gFastOtaChannel);
+    response += "|1";
+
+    notifyText(response);
+
+    Serial.printf(
+        "Fast OTA ready: channel=%d hidden=1\n",
+        gFastOtaChannel
+    );
+}
+
+static bool parseFastOtaHeader(
+    const String& header,
+    size_t& imageSize,
+    uint8_t expectedSha[32],
+    uint8_t expectedHmac[32]
+) {
+    if (fieldAt(header, '|', 0) != "PL_OTA_V1") {
+        return false;
+    }
+
+    String sizeText = fieldAt(header, '|', 1);
+    String shaText = fieldAt(header, '|', 2);
+    String hmacText = fieldAt(header, '|', 3);
+    String tokenText = fieldAt(header, '|', 4);
+
+    imageSize =
+        static_cast<size_t>(
+            strtoull(sizeText.c_str(), nullptr, 10)
+        );
+
+    if (imageSize == 0 || imageSize > 0x600000) {
+        return false;
+    }
+
+    if (!hexToBytes(
+            shaText,
+            expectedSha,
+            32
+        )) {
+        return false;
+    }
+
+    if (!hexToBytes(
+            hmacText,
+            expectedHmac,
+            32
+        )) {
+        return false;
+    }
+
+    uint8_t suppliedToken[32];
+
+    if (!hexToBytes(
+            tokenText,
+            suppliedToken,
+            sizeof(suppliedToken)
+        )) {
+        return false;
+    }
+
+    return constantTimeEqual(
+        suppliedToken,
+        gFastOtaToken,
+        sizeof(gFastOtaToken)
+    );
+}
+
+static void serviceFastOta() {
+    if (!gFastOtaActive) return;
+
+    if (
+        millis() - gFastOtaStartedAt >
+        FAST_OTA_TIMEOUT_MS
+    ) {
+        notifyText("FAST_OTA_ERROR|timeout");
+        stopFastOtaSession();
+        return;
+    }
+
+    WiFiClient client = gFastOtaServer.available();
+
+    if (!client) return;
+
+    client.setNoDelay(true);
+    client.setTimeout(10);
+
+    String header = client.readStringUntil('\n');
+    header.trim();
+
+    size_t imageSize = 0;
+    uint8_t expectedSha[32];
+    uint8_t expectedHmac[32];
+
+    if (!parseFastOtaHeader(
+            header,
+            imageSize,
+            expectedSha,
+            expectedHmac
+        )) {
+        client.print("ERROR|auth_or_header\n");
+        client.flush();
+        delay(30);
+        client.stop();
+        return;
+    }
+
+    if (!startDigests()) {
+        client.print("ERROR|digest_init\n");
+        client.flush();
+        client.stop();
+        stopFastOtaSession();
+        return;
+    }
+
+    if (!Update.begin(imageSize, U_FLASH)) {
+        freeDigests();
+        client.print("ERROR|update_begin\n");
+        client.flush();
+        client.stop();
+        stopFastOtaSession();
+        return;
+    }
+
+    client.print("READY\n");
+    client.flush();
+
+    uint8_t* buffer =
+        static_cast<uint8_t*>(malloc(8192));
+
+    if (buffer == nullptr) {
+        failFastOtaClient(client, "no_memory");
+        return;
+    }
+
+    size_t received = 0;
+    uint32_t lastDataAt = millis();
+
+    while (
+        received < imageSize &&
+        client.connected()
+    ) {
+        int available = client.available();
+
+        if (available <= 0) {
+            if (millis() - lastDataAt > 15000) {
+                free(buffer);
+                failFastOtaClient(
+                    client,
+                    "data_timeout"
+                );
+                return;
+            }
+
+            delay(1);
+            continue;
+        }
+
+        size_t wanted = min(
+            static_cast<size_t>(available),
+            min(
+                static_cast<size_t>(8192),
+                imageSize - received
+            )
+        );
+
+        int got = client.read(buffer, wanted);
+
+        if (got <= 0) {
+            delay(1);
+            continue;
+        }
+
+        lastDataAt = millis();
+
+        size_t written =
+            Update.write(buffer, got);
+
+        if (written != static_cast<size_t>(got)) {
+            free(buffer);
+            failFastOtaClient(
+                client,
+                "write_failed"
+            );
+            return;
+        }
+
+        mbedtls_md_update(
+            &gShaCtx,
+            buffer,
+            got
+        );
+
+        mbedtls_md_hmac_update(
+            &gHmacCtx,
+            buffer,
+            got
+        );
+
+        received += got;
+    }
+
+    free(buffer);
+
+    if (received != imageSize) {
+        failFastOtaClient(
+            client,
+            "size_mismatch"
+        );
+        return;
+    }
+
+    uint8_t actualSha[32];
+    uint8_t actualHmac[32];
+
+    if (mbedtls_md_finish(
+            &gShaCtx,
+            actualSha
+        ) != 0) {
+        failFastOtaClient(client, "sha_finish");
+        return;
+    }
+
+    if (mbedtls_md_hmac_finish(
+            &gHmacCtx,
+            actualHmac
+        ) != 0) {
+        failFastOtaClient(client, "hmac_finish");
+        return;
+    }
+
+    freeDigests();
+
+    if (!constantTimeEqual(
+            actualSha,
+            expectedSha,
+            32
+        )) {
+        failFastOtaClient(client, "sha_mismatch");
+        return;
+    }
+
+    if (!constantTimeEqual(
+            actualHmac,
+            expectedHmac,
+            32
+        )) {
+        failFastOtaClient(client, "hmac_mismatch");
+        return;
+    }
+
+    if (!Update.end(true)) {
+        failFastOtaClient(client, "update_end");
+        return;
+    }
+
+    client.print("OK|" FW_VERSION "\n");
+    client.flush();
+
+    notifyText(
+        "FAST_OTA_OK|" +
+        String(received)
+    );
+
+    delay(350);
+    client.stop();
+
+    ESP.restart();
 }
 
 static void processControl(const String& message) {
@@ -578,6 +1015,19 @@ static void processControl(const String& message) {
         notifyText("OK|reboot");
         delay(300);
         ESP.restart();
+        return;
+    }
+
+    if (message == "FAST_OTA_BEGIN") {
+        startFastOtaSession();
+        return;
+    }
+
+    if (message == "FAST_OTA_CANCEL") {
+        if (gFastOtaActive) {
+            stopFastOtaSession();
+        }
+        notifyText("FAST_OTA_STOPPED");
         return;
     }
 
@@ -761,11 +1211,15 @@ void setup() {
     Serial.println("Target: ESP32-S3 N16R8");
     Serial.println("Advertising iniciado.");
     Serial.println("Research mode: passive Wi-Fi + passive BLE survey.");
+    Serial.println("Fast OTA: secure temporary Wi-Fi transport enabled.");
 }
 
 void loop() {
+    serviceFastOta();
+
     if (
         !gOtaActive &&
+        !gFastOtaActive &&
         (
             gResearch.lastSurveyMs == 0 ||
             millis() - gLastResearchSurvey >= RESEARCH_SURVEY_INTERVAL_MS
