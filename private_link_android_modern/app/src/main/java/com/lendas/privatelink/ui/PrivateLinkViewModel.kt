@@ -44,7 +44,8 @@ class PrivateLinkViewModel(application: Application) :
     private val discovery =
         PrivateLinkBleManager(
             application,
-            DiscoveryListener()
+            DiscoveryListener(),
+            enableBondReceiver = false
         ).also {
             it.setPrivateKey(
                 secureKeyStore.loadKey()
@@ -131,6 +132,12 @@ class PrivateLinkViewModel(application: Application) :
     }
 
     fun connect(device: NearbyDevice) {
+        discovery.stopScan()
+        _state.value = _state.value.copy(
+            scanning = false,
+            statusText = "Abrindo sessão com o nó..."
+        )
+
         val address = device.address
         val manager = sessions.getOrPut(
             address
