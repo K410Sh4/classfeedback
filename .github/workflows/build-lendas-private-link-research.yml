@@ -43,7 +43,9 @@ jobs:
           BOOT_APP0="$(find ~/.platformio/packages -name boot_app0.bin | head -n 1)"
           test -n "$BOOT_APP0"
           cp "$BOOT_APP0" out/boot_app0.bin
-          python -m esptool --chip esp32s3 merge_bin -o out/LENDAS_PrivateLink_Research_v1_1_FULL_PLACEHOLDER.bin \
+          ESPTOOL="$(find ~/.platformio/packages -type f -name esptool.py | head -n 1)"
+          test -n "$ESPTOOL"
+          python "$ESPTOOL" --chip esp32s3 merge_bin -o out/LENDAS_PrivateLink_Research_v1_1_FULL_PLACEHOLDER.bin \
             0x0 out/bootloader.bin \
             0x8000 out/partitions.bin \
             0xE000 out/boot_app0.bin \
