@@ -11,6 +11,21 @@ object Protocol {
 
     const val PAIRING_PASSKEY = 496110
     const val MIN_RSSI = -78
-    const val OTA_CHUNK = 180
+
+    const val BLE_OTA_CHUNK = 180
     const val MAX_WRITE_RETRIES = 8
+
+    const val FAST_OTA_PORT = 3232
+    const val FAST_OTA_TIMEOUT_MS = 120_000L
+    const val FAST_OTA_CONNECT_TIMEOUT_MS = 25_000L
 }
+
+data class FastOtaCredentials(
+    val ssid: String,
+    val password: String,
+    val tokenHex: String,
+    val host: String,
+    val port: Int,
+    val channel: Int,
+    val hidden: Boolean
+)
