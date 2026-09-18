@@ -6,7 +6,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-#define FW_VERSION "1.2.0"
+#define FW_VERSION "1.2.1"
 #define BLE_PASSKEY 496110
 
 static const char* SERVICE_UUID =
@@ -1105,7 +1105,23 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     void onAuthenticationComplete(
         NimBLEConnInfo& connInfo
     ) override {
-        if (!connInfo.isEncrypted() || !connInfo.isAuthenticated()) {
+        Serial.printf(
+            "BLE security complete: encrypted=%d authenticated=%d\n",
+            connInfo.isEncrypted() ? 1 : 0,
+            connInfo.isAuthenticated() ? 1 : 0
+        );
+
+        // Android/NimBLE combinations can report the authenticated flag as
+        // false even after a valid bonded encrypted link. Requiring that flag
+        // here caused reliable Samsung reconnects to be dropped immediately.
+        // Transport security is therefore enforced with encryption, while
+        // command authenticity remains enforced independently by the
+        // PrivateLink HMAC challenge-response.
+        if (!connInfo.isEncrypted()) {
+            Serial.println(
+                "BLE encryption failed; disconnecting peer."
+            );
+
             if (gServer != nullptr) {
                 gServer->disconnect(connInfo);
             }
@@ -1169,7 +1185,7 @@ void setup() {
         service->createCharacteristic(
             CONTROL_UUID,
             NIMBLE_PROPERTY::WRITE |
-            NIMBLE_PROPERTY::WRITE_AUTHEN,
+            NIMBLE_PROPERTY::WRITE_ENC,
             512
         );
 
@@ -1178,7 +1194,7 @@ void setup() {
     gResponse =
         service->createCharacteristic(
             RESPONSE_UUID,
-            NIMBLE_PROPERTY::READ_AUTHEN |
+            NIMBLE_PROPERTY::READ_ENC |
             NIMBLE_PROPERTY::NOTIFY,
             512
         );
@@ -1187,7 +1203,7 @@ void setup() {
         service->createCharacteristic(
             OTA_UUID,
             NIMBLE_PROPERTY::WRITE |
-            NIMBLE_PROPERTY::WRITE_AUTHEN,
+            NIMBLE_PROPERTY::WRITE_ENC,
             512
         );
 
