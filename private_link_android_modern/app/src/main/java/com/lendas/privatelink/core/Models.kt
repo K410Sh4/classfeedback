@@ -10,6 +10,10 @@ data class NearbyDevice(
 
 data class Telemetry(
     val firmware: String = "-",
+    val nodeId: String? = null,
+    val model: String? = null,
+    val role: String? = null,
+    val flashBytes: Long? = null,
     val uptimeMs: Long? = null,
     val heap: Long? = null,
     val batteryVolts: String = "na",
@@ -24,6 +28,16 @@ data class Telemetry(
     val bleSeen: Int? = null,
     val bleBest: Int? = null,
     val surveyAgeMs: Long? = null
+)
+
+data class NodeInfo(
+    val nodeId: String? = null,
+    val model: String? = null,
+    val board: String? = null,
+    val role: String? = null,
+    val firmware: String = "-",
+    val flashBytes: Long? = null,
+    val capabilities: Set<String> = emptySet()
 )
 
 enum class LinkState {
@@ -46,21 +60,54 @@ enum class OtaTransport {
     WifiFast
 }
 
-data class PrivateLinkUiState(
+data class NodeState(
+    val address: String,
+    val rssi: Int? = null,
     val linkState: LinkState = LinkState.Idle,
-    val statusText: String = "Aguardando ESP32-S3",
-    val devices: List<NearbyDevice> = emptyList(),
-    val connectedAddress: String? = null,
-    val connectedRssi: Int? = null,
+    val statusText: String = "Disponível",
     val authenticated: Boolean = false,
+    val info: NodeInfo = NodeInfo(),
     val telemetry: Telemetry = Telemetry(),
-    val logs: List<String> = listOf("Pronto."),
     val otaProgress: Float = 0f,
     val otaFileName: String? = null,
     val otaTransport: OtaTransport = OtaTransport.None,
     val otaSpeedBytesPerSecond: Long? = null,
     val otaTransferredBytes: Long = 0L,
     val otaTotalBytes: Long = 0L,
+    val lastError: String? = null
+) {
+    val displayName: String
+        get() = when {
+            info.model?.contains("C6", ignoreCase = true) == true ->
+                "nanoESP32-C6"
+            info.model?.contains("S3", ignoreCase = true) == true ->
+                "ESP32-S3"
+            info.model != null ->
+                info.model
+            else ->
+                "PrivateLink Node"
+        }
+
+    val nodeKey: String
+        get() = info.nodeId ?: address
+}
+
+data class PrivateLinkUiState(
+    val scanning: Boolean = false,
+    val statusText: String = "Aguardando nós PrivateLink",
+    val devices: List<NearbyDevice> = emptyList(),
+    val nodes: List<NodeState> = emptyList(),
+    val selectedNodeKey: String? = null,
+    val logs: List<String> = listOf("Pronto."),
     val hasPrivateKey: Boolean = false,
     val lastError: String? = null
-)
+) {
+    val selectedNode: NodeState?
+        get() = nodes.firstOrNull {
+            it.nodeKey == selectedNodeKey ||
+                it.address == selectedNodeKey
+        }
+
+    val authenticatedCount: Int
+        get() = nodes.count { it.authenticated }
+}
