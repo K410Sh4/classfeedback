@@ -3,8 +3,10 @@
 #include <Update.h>
 #include <mbedtls/md.h>
 #include <esp_system.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
 
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.1.0"
 #define BLE_PASSKEY 496110
 
 static const char* SERVICE_UUID =
@@ -37,6 +39,24 @@ static bool gConnected = false;
 static bool gAuthenticated = false;
 static uint8_t gChallenge[16];
 static uint32_t gLastTelemetry = 0;
+static uint32_t gLastResearchSurvey = 0;
+static const uint32_t RESEARCH_SURVEY_INTERVAL_MS = 60000;
+
+struct ResearchStats {
+    int wifiApCount = 0;
+    int wifiOpenCount = 0;
+    int wifiSecureCount = 0;
+    int wifiBestRssi = -127;
+    int wifiPeakChannel = 0;
+    int wifiPeakChannelCount = 0;
+
+    int bleSeenCount = 0;
+    int bleBestRssi = -127;
+
+    uint32_t lastSurveyMs = 0;
+};
+
+static ResearchStats gResearch;
 
 static bool gOtaActive = false;
 static size_t gOtaSize = 0;
@@ -351,6 +371,154 @@ static void finishOta() {
     ESP.restart();
 }
 
+static void runWifiSurvey() {
+    if (gOtaActive) return;
+
+    wifi_scan_config_t config = {};
+    config.ssid = nullptr;
+    config.bssid = nullptr;
+    config.channel = 0;
+    config.show_hidden = true;
+    config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+    config.scan_time.passive = 80;
+
+    esp_err_t err = esp_wifi_scan_start(&config, true);
+    if (err != ESP_OK) {
+        Serial.printf("WiFi passive survey failed: %d\n", static_cast<int>(err));
+        return;
+    }
+
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+
+    gResearch.wifiApCount = static_cast<int>(count);
+    gResearch.wifiOpenCount = 0;
+    gResearch.wifiSecureCount = 0;
+    gResearch.wifiBestRssi = -127;
+    gResearch.wifiPeakChannel = 0;
+    gResearch.wifiPeakChannelCount = 0;
+
+    int channelCounts[15] = {0};
+
+    if (count > 0) {
+        wifi_ap_record_t* records =
+            static_cast<wifi_ap_record_t*>(calloc(count, sizeof(wifi_ap_record_t)));
+
+        if (records != nullptr) {
+            uint16_t fetched = count;
+
+            if (esp_wifi_scan_get_ap_records(&fetched, records) == ESP_OK) {
+                gResearch.wifiApCount = static_cast<int>(fetched);
+
+                for (uint16_t i = 0; i < fetched; ++i) {
+                    const wifi_ap_record_t& ap = records[i];
+
+                    if (ap.rssi > gResearch.wifiBestRssi) {
+                        gResearch.wifiBestRssi = ap.rssi;
+                    }
+
+                    if (ap.authmode == WIFI_AUTH_OPEN) {
+                        ++gResearch.wifiOpenCount;
+                    } else {
+                        ++gResearch.wifiSecureCount;
+                    }
+
+                    if (ap.primary >= 1 && ap.primary <= 14) {
+                        ++channelCounts[ap.primary];
+                    }
+                }
+
+                for (int channel = 1; channel <= 14; ++channel) {
+                    if (channelCounts[channel] > gResearch.wifiPeakChannelCount) {
+                        gResearch.wifiPeakChannelCount = channelCounts[channel];
+                        gResearch.wifiPeakChannel = channel;
+                    }
+                }
+            }
+
+            free(records);
+        }
+    }
+
+    esp_wifi_clear_ap_list();
+}
+
+static void runBleSurvey() {
+    if (gOtaActive) return;
+
+    NimBLEScan* scan = NimBLEDevice::getScan();
+
+    scan->stop();
+    scan->clearResults();
+    scan->setActiveScan(false);
+    scan->setInterval(120);
+    scan->setWindow(60);
+    scan->setMaxResults(80);
+
+    NimBLEScanResults results = scan->getResults(2500, false);
+
+    gResearch.bleSeenCount = results.getCount();
+    gResearch.bleBestRssi = -127;
+
+    for (int i = 0; i < results.getCount(); ++i) {
+        const NimBLEAdvertisedDevice* device = results.getDevice(i);
+
+        if (device != nullptr && device->getRSSI() > gResearch.bleBestRssi) {
+            gResearch.bleBestRssi = device->getRSSI();
+        }
+    }
+
+    scan->clearResults();
+
+    if (gAdvertising != nullptr && !gConnected) {
+        gAdvertising->start();
+    }
+}
+
+static void runResearchSurvey() {
+    if (gOtaActive) return;
+
+    runWifiSurvey();
+    delay(40);
+    runBleSurvey();
+
+    gResearch.lastSurveyMs = millis();
+    gLastResearchSurvey = millis();
+
+    Serial.printf(
+        "Research survey: wifi=%d open=%d secure=%d best=%d peak_ch=%d ble=%d ble_best=%d\n",
+        gResearch.wifiApCount,
+        gResearch.wifiOpenCount,
+        gResearch.wifiSecureCount,
+        gResearch.wifiBestRssi,
+        gResearch.wifiPeakChannel,
+        gResearch.bleSeenCount,
+        gResearch.bleBestRssi
+    );
+}
+
+static String telemetryText() {
+    String text = "TEL|fw=" FW_VERSION;
+    text += "|uptime_ms=" + String(millis());
+    text += "|heap=" + String(ESP.getFreeHeap());
+    text += "|battery_v=na";
+    text += "|ota=";
+    text += gOtaActive ? "1" : "0";
+
+    text += "|wifi_ap=" + String(gResearch.wifiApCount);
+    text += "|wifi_open=" + String(gResearch.wifiOpenCount);
+    text += "|wifi_secure=" + String(gResearch.wifiSecureCount);
+    text += "|wifi_best=" + String(gResearch.wifiBestRssi);
+    text += "|wifi_peak_ch=" + String(gResearch.wifiPeakChannel);
+    text += "|wifi_peak_n=" + String(gResearch.wifiPeakChannelCount);
+    text += "|ble_seen=" + String(gResearch.bleSeenCount);
+    text += "|ble_best=" + String(gResearch.bleBestRssi);
+    text += "|survey_age_ms=" +
+        String(gResearch.lastSurveyMs == 0 ? 0 : millis() - gResearch.lastSurveyMs);
+
+    return text;
+}
+
 static void processControl(const String& message) {
     if (message == "HELLO") {
         makeChallenge();
@@ -402,14 +570,7 @@ static void processControl(const String& message) {
     }
 
     if (message == "STATUS") {
-        String text = "TEL|fw=" FW_VERSION;
-        text += "|uptime_ms=" + String(millis());
-        text += "|heap=" + String(ESP.getFreeHeap());
-        text += "|battery_v=na";
-        text += "|ota=";
-        text += gOtaActive ? "1" : "0";
-
-        notifyText(text);
+        notifyText(telemetryText());
         return;
     }
 
@@ -590,14 +751,29 @@ void setup() {
     gAdvertising->setMaxInterval(1920);
     gAdvertising->start();
 
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(true, true);
+    delay(120);
+
     Serial.println();
-    Serial.println("LENDAS S3 PrivateLink");
+    Serial.println("LENDAS S3 PrivateLink Research");
     Serial.println("Firmware: " FW_VERSION);
     Serial.println("Target: ESP32-S3 N16R8");
     Serial.println("Advertising iniciado.");
+    Serial.println("Research mode: passive Wi-Fi + passive BLE survey.");
 }
 
 void loop() {
+    if (
+        !gOtaActive &&
+        (
+            gResearch.lastSurveyMs == 0 ||
+            millis() - gLastResearchSurvey >= RESEARCH_SURVEY_INTERVAL_MS
+        )
+    ) {
+        runResearchSurvey();
+    }
+
     if (
         gConnected &&
         gAuthenticated &&
@@ -605,14 +781,7 @@ void loop() {
         millis() - gLastTelemetry >= 5000
     ) {
         gLastTelemetry = millis();
-
-        String text = "TEL|fw=" FW_VERSION;
-        text += "|uptime_ms=" + String(millis());
-        text += "|heap=" + String(ESP.getFreeHeap());
-        text += "|battery_v=na";
-        text += "|ota=0";
-
-        notifyText(text);
+        notifyText(telemetryText());
     }
 
     delay(20);
