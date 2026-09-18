@@ -1,4 +1,4 @@
-name: Build LENDAS PrivateLink APK
+name: Build LENDAS PrivateLink APK v1.1
 
 on:
   push:
