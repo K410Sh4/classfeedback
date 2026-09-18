@@ -20,8 +20,9 @@
         android:usesPermissionFlags="neverForLocation" />
 
     <application
+        android:name=".PrivateLinkApplication"
         android:allowBackup="false"
-        android:label="LENDAS S3 PrivateLink"
+        android:label="LENDAS PrivateLink"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
