@@ -27,6 +27,7 @@ import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import com.lendas.privatelink.core.Crypto
+import com.lendas.privatelink.core.FastOtaCredentials
 import com.lendas.privatelink.core.LinkState
 import com.lendas.privatelink.core.NearbyDevice
 import com.lendas.privatelink.core.Protocol
@@ -49,6 +50,8 @@ class PrivateLinkBleManager(
         fun onTelemetry(telemetry: Telemetry)
         fun onOtaProgress(progress: Float, fileName: String?)
         fun onConnectedAddress(address: String?)
+        fun onFastOtaReady(credentials: FastOtaCredentials)
+        fun onFastOtaUnavailable(reason: String)
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -86,6 +89,8 @@ class PrivateLinkBleManager(
     private var otaFileName: String? = null
     private var otaOffset = 0
     private var waitingOtaReady = false
+    private var awaitingFastOta = false
+    private var fastOtaRequestGeneration = 0
     private var receiverRegistered = false
 
     init {
@@ -204,6 +209,8 @@ class PrivateLinkBleManager(
         authGeneration++
         otaActive = false
         waitingOtaReady = false
+        awaitingFastOta = false
+        fastOtaRequestGeneration++
         synchronized(writes) {
             writes.clear()
             writing = false
@@ -230,6 +237,47 @@ class PrivateLinkBleManager(
         }
         enqueueText(controlChar, command)
     }
+
+    fun requestFastOta() {
+        if (!authenticated || controlChar == null) {
+            listener.onFastOtaUnavailable("Canal BLE não autenticado.")
+            return
+        }
+
+        awaitingFastOta = true
+        val generation = ++fastOtaRequestGeneration
+
+        listener.onLinkState(
+            LinkState.PreparingFastOta,
+            "Preparando canal Wi‑Fi privado..."
+        )
+
+        log("Solicitando sessão FAST_OTA pelo BLE autenticado.")
+        enqueueText(controlChar, "FAST_OTA_BEGIN")
+
+        handler.postDelayed({
+            if (
+                generation == fastOtaRequestGeneration &&
+                awaitingFastOta &&
+                authenticated
+            ) {
+                awaitingFastOta = false
+                listener.onFastOtaUnavailable(
+                    "Firmware atual não respondeu ao Fast OTA; usando BLE compatível."
+                )
+            }
+        }, 6_000)
+    }
+
+    fun cancelFastOtaSession() {
+        awaitingFastOta = false
+        fastOtaRequestGeneration++
+
+        if (authenticated) {
+            enqueueText(controlChar, "FAST_OTA_CANCEL")
+        }
+    }
+
 
     fun startOta(firmware: ByteArray, fileName: String) {
         val key = privateKey
@@ -362,6 +410,52 @@ class PrivateLinkBleManager(
                 listener.onTelemetry(parseTelemetry(message))
             }
 
+            message.startsWith("FAST_OTA_READY|") && awaitingFastOta -> {
+                awaitingFastOta = false
+                fastOtaRequestGeneration++
+
+                val parts = message.split("|")
+
+                if (parts.size < 8) {
+                    listener.onFastOtaUnavailable(
+                        "Resposta FAST_OTA inválida."
+                    )
+                } else {
+                    val credentials = FastOtaCredentials(
+                        ssid = parts[1],
+                        password = parts[2],
+                        tokenHex = parts[3],
+                        host = parts[4],
+                        port = parts[5].toIntOrNull() ?: Protocol.FAST_OTA_PORT,
+                        channel = parts[6].toIntOrNull() ?: 6,
+                        hidden = parts[7] == "1"
+                    )
+
+                    log(
+                        "Sessão Fast OTA criada • canal ${credentials.channel} • " +
+                            "rede temporária protegida."
+                    )
+
+                    listener.onFastOtaReady(credentials)
+                }
+            }
+
+            message.startsWith("FAST_OTA_ERROR|") && awaitingFastOta -> {
+                awaitingFastOta = false
+                fastOtaRequestGeneration++
+                listener.onFastOtaUnavailable(
+                    message.substringAfter("FAST_OTA_ERROR|")
+                )
+            }
+
+            message == "ERR|unknown_command" && awaitingFastOta -> {
+                awaitingFastOta = false
+                fastOtaRequestGeneration++
+                listener.onFastOtaUnavailable(
+                    "Fast OTA não existe neste firmware; usando BLE compatível."
+                )
+            }
+
             message.startsWith("OTA_READY|") && waitingOtaReady -> {
                 waitingOtaReady = false
                 otaOffset = 0
@@ -411,6 +505,7 @@ class PrivateLinkBleManager(
             heap = map["heap"]?.toLongOrNull(),
             batteryVolts = map["battery_v"] ?: "na",
             otaActive = map["ota"] == "1",
+            fastOtaActive = map["fast_ota"] == "1",
             wifiAp = map["wifi_ap"]?.toIntOrNull(),
             wifiOpen = map["wifi_open"]?.toIntOrNull(),
             wifiSecure = map["wifi_secure"]?.toIntOrNull(),
