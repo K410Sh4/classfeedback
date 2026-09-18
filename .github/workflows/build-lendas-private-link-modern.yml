@@ -1,4 +1,4 @@
-name: Build LENDAS PrivateLink Multi-Node APK 2.3.2
+name: Build ESPhub APK 2.4.0
 
 on:
   push:
@@ -30,21 +30,28 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Build modern release APK
+      - name: Materialize ESPhub launcher icon
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p private_link_android_modern/app/src/main/res/drawable
+          base64 -d             private_link_android_modern/branding/esphub_icon_192.webp.b64             > private_link_android_modern/app/src/main/res/drawable/esphub_icon.webp
+
+      - name: Build ESPhub release APK
         working-directory: private_link_android_modern
         run: gradle --no-daemon :app:assembleRelease
 
       - name: Rename APK
         run: |
-          cp private_link_android_modern/app/build/outputs/apk/release/app-release.apk LENDAS_PrivateLink_2_3_2.apk
-          sha256sum LENDAS_PrivateLink_2_3_2.apk | tee LENDAS_PrivateLink_2_3_2.sha256
+          cp private_link_android_modern/app/build/outputs/apk/release/app-release.apk ESPhub_2_4_0.apk
+          sha256sum ESPhub_2_4_0.apk | tee ESPhub_2_4_0.sha256
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LENDAS_PrivateLink_2_3_2_APK
+          name: ESPhub_2_4_0_APK
           path: |
-            LENDAS_PrivateLink_2_3_2.apk
-            LENDAS_PrivateLink_2_3_2.sha256
+            ESPhub_2_4_0.apk
+            ESPhub_2_4_0.sha256
           if-no-files-found: error
           retention-days: 7
