@@ -70,13 +70,13 @@ static bool hexToBytes(const String& text, uint8_t* out, size_t outLen) {
 }
 
 static String bytesToHex(const uint8_t* data, size_t len) {
-    static const char* HEX = "0123456789abcdef";
+    static const char* HEX_CHARS = "0123456789abcdef";
     String out;
     out.reserve(len * 2);
 
     for (size_t i = 0; i < len; ++i) {
-        out += HEX[(data[i] >> 4) & 0x0F];
-        out += HEX[data[i] & 0x0F];
+        out += HEX_CHARS[(data[i] >> 4) & 0x0F];
+        out += HEX_CHARS[data[i] & 0x0F];
     }
 
     return out;
@@ -277,7 +277,7 @@ static void receiveOtaData(const uint8_t* data, size_t len) {
         return;
     }
 
-    size_t written = Update.write(data, len);
+    size_t written = Update.write(const_cast<uint8_t*>(data), len);
 
     if (written != len) {
         abortOta("write_failed");
