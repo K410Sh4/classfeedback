@@ -1,4 +1,6 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)\n\npackage com.lendas.privatelink
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
+package com.lendas.privatelink
 
 import android.Manifest
 import android.content.pm.PackageManager
