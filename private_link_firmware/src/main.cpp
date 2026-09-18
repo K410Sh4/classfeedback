@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include "BoardConfig.h"
+#include "LabTest.h"
 
 #define BLE_PASSKEY 496110
 
@@ -2023,9 +2024,199 @@ static void processControl(
     }
 
     if (
+        message.startsWith(
+            "LAB_WIFI|"
+        )
+    ) {
+        if (
+            gOtaActive ||
+            gFastOtaActive ||
+            LabTest::isBusy()
+        ) {
+            notifyText(
+                "LAB_ERROR|reason=busy"
+            );
+            return;
+        }
+
+        String error;
+
+        const bool ok =
+            LabTest::setWifiCredentialsBase64(
+                fieldAt(
+                    message,
+                    '|',
+                    1
+                ),
+                fieldAt(
+                    message,
+                    '|',
+                    2
+                ),
+                error
+            );
+
+        notifyText(
+            ok
+                ? "LAB_WIFI_OK"
+                : (
+                    "LAB_ERROR|reason=" +
+                    error
+                )
+        );
+
+        return;
+    }
+
+    if (
+        message.startsWith(
+            "LAB_CONFIG|"
+        )
+    ) {
+        if (
+            gOtaActive ||
+            gFastOtaActive ||
+            LabTest::isBusy()
+        ) {
+            notifyText(
+                "LAB_ERROR|reason=busy"
+            );
+            return;
+        }
+
+        const String target =
+            fieldAt(
+                message,
+                '|',
+                1
+            );
+
+        const uint16_t port =
+            static_cast<uint16_t>(
+                strtoul(
+                    fieldAt(
+                        message,
+                        '|',
+                        2
+                    ).c_str(),
+                    nullptr,
+                    10
+                )
+            );
+
+        const uint8_t level =
+            static_cast<uint8_t>(
+                strtoul(
+                    fieldAt(
+                        message,
+                        '|',
+                        3
+                    ).c_str(),
+                    nullptr,
+                    10
+                )
+            );
+
+        const uint32_t durationSeconds =
+            static_cast<uint32_t>(
+                strtoul(
+                    fieldAt(
+                        message,
+                        '|',
+                        4
+                    ).c_str(),
+                    nullptr,
+                    10
+                )
+            );
+
+        String error;
+
+        const bool ok =
+            LabTest::configure(
+                target,
+                port,
+                level,
+                durationSeconds,
+                error
+            );
+
+        notifyText(
+            ok
+                ? LabTest::statusText()
+                : (
+                    "LAB_ERROR|reason=" +
+                    error
+                )
+        );
+
+        return;
+    }
+
+    if (
+        message ==
+        "LAB_START"
+    ) {
+        if (
+            gOtaActive ||
+            gFastOtaActive
+        ) {
+            notifyText(
+                "LAB_ERROR|reason=busy"
+            );
+            return;
+        }
+
+        String error;
+
+        const bool ok =
+            LabTest::start(
+                gNodeId,
+                error
+            );
+
+        if (!ok) {
+            notifyText(
+                "LAB_ERROR|reason=" +
+                error
+            );
+        }
+
+        return;
+    }
+
+    if (
+        message ==
+        "LAB_STOP"
+    ) {
+        LabTest::stop(
+            "app_stop"
+        );
+
+        return;
+    }
+
+    if (
+        message ==
+        "LAB_STATUS"
+    ) {
+        notifyText(
+            LabTest::statusText()
+        );
+
+        return;
+    }
+
+    if (
         message ==
         "FAST_OTA_BEGIN"
     ) {
+        if (LabTest::isBusy()) {
+            notifyText(
+                "FAST_OTA_ERROR|lab_active"
+            );
+            return;
+        }
         startFastOtaSession();
         return;
     }
@@ -2049,6 +2240,13 @@ static void processControl(
             "OTA_BEGIN|"
         )
     ) {
+        if (LabTest::isBusy()) {
+            notifyText(
+                "OTA_ERROR|lab_active"
+            );
+            return;
+        }
+
         beginOta(message);
         return;
     }
@@ -2217,6 +2415,12 @@ class ServerCallbacks :
             gOtaReceived = 0;
         }
 
+        if (LabTest::isBusy()) {
+            LabTest::stop(
+                "control_lost"
+            );
+        }
+
         gNextResearchAt =
             millis() +
             RESEARCH_IDLE_DELAY_MS;
@@ -2343,7 +2547,7 @@ void setup() {
 
     Serial.println();
     Serial.println(
-        "LENDAS PrivateLink Multi-Node"
+        "ESPhub Multi-Node + LabTest V1"
     );
 
     Serial.println(
@@ -2413,6 +2617,19 @@ void setup() {
 
 void loop() {
     serviceFastOta();
+    LabTest::service();
+
+    String labNotification;
+
+    if (
+        LabTest::pollNotification(
+            labNotification
+        )
+    ) {
+        notifyText(
+            labNotification
+        );
+    }
 
     uint32_t now = millis();
 
@@ -2420,6 +2637,7 @@ void loop() {
         !gConnected &&
         !gOtaActive &&
         !gFastOtaActive &&
+        !LabTest::isBusy() &&
         static_cast<int32_t>(
             now -
             gNextResearchAt
