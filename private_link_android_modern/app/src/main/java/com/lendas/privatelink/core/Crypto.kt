@@ -25,4 +25,22 @@ object Crypto {
 
     fun sha256(data: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(data)
+
+    fun deriveNodeKey(
+        masterKey: ByteArray,
+        nodeId: String
+    ): ByteArray {
+        require(masterKey.size == 32) {
+            "Master key inválida"
+        }
+
+        val context =
+            "LENDAS_PRIVATE_LINK_NODE_V1|" +
+                nodeId.trim().uppercase()
+
+        return hmacSha256(
+            masterKey,
+            context.toByteArray(Charsets.UTF_8)
+        )
+    }
 }
