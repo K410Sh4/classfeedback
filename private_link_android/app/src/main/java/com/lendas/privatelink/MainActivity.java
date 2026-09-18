@@ -72,7 +72,7 @@ public class MainActivity extends Activity {
     private static final int MIN_RSSI = -78;
     private static final int REQUEST_BLE_PERMISSIONS = 1001;
     private static final int REQUEST_FIRMWARE = 1002;
-    private static final int OTA_CHUNK = 180;
+    private static final int OTA_CHUNK = 180;\n    private static final int MAX_WRITE_START_RETRIES = 8;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<String, ScanResult> devices = new LinkedHashMap<>();
@@ -648,8 +648,15 @@ public class MainActivity extends Activity {
                 log("BLE conectado.");
 
                 if (hasBlePermissions()) {
+                    bluetoothGatt.requestConnectionPriority(
+                            BluetoothGatt.CONNECTION_PRIORITY_HIGH);
                     bluetoothGatt.requestMtu(247);
-                    bluetoothGatt.discoverServices();
+
+                    mainHandler.postDelayed(() -> {
+                        if (connected && gatt == bluetoothGatt) {
+                            bluetoothGatt.discoverServices();
+                        }
+                    }, 450);
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connected = false;
@@ -715,7 +722,7 @@ public class MainActivity extends Activity {
                                       int status) {
             if (descriptor.getUuid().equals(CCCD_UUID)) {
                 log("Notifications ativas. status=" + status);
-                mainHandler.postDelayed(MainActivity.this::beginAuthentication, 250);
+                mainHandler.postDelayed(MainActivity.this::beginAuthentication, 1200);
             }
         }
 
@@ -762,11 +769,28 @@ public class MainActivity extends Activity {
         }
     };
 
+    private int authGeneration = 0;
+
     private void beginAuthentication() {
         if (!connected || controlChar == null || privateKey == null) return;
+
         authenticated = false;
+        final int generation = ++authGeneration;
+
         runOnUiThread(() -> setState("Autenticando aplicativo..."));
+        log("Iniciando HELLO seguro...");
         enqueueText(controlChar, "HELLO", null);
+
+        mainHandler.postDelayed(() -> {
+            if (generation != authGeneration || authenticated || !connected) return;
+
+            log("Timeout aguardando HELLO/AUTH. Reiniciando handshake uma vez...");
+            synchronized (writeQueue) {
+                writeQueue.clear();
+                writing = false;
+            }
+            enqueueText(controlChar, "HELLO", null);
+        }, 8000);
     }
 
     private void handleNotification(byte[] bytes) {
@@ -788,6 +812,7 @@ public class MainActivity extends Activity {
 
         if (message.startsWith("AUTH_OK|")) {
             authenticated = true;
+            authGeneration++;
             runOnUiThread(() -> {
                 setState("Canal privado autenticado");
                 setAuthenticatedControls(true);
@@ -1026,27 +1051,50 @@ public class MainActivity extends Activity {
         }
 
         boolean started;
+        int startStatus = 0;
 
         if (Build.VERSION.SDK_INT >= 33) {
-            int result = localGatt.writeCharacteristic(
+            startStatus = localGatt.writeCharacteristic(
                     task.characteristic,
                     task.payload,
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            started = result == 0;
+            started = startStatus == 0;
         } else {
             task.characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
             task.characteristic.setValue(task.payload);
             started = localGatt.writeCharacteristic(task.characteristic);
+            startStatus = started ? 0 : -1;
         }
 
         if (!started) {
+            task.startAttempts++;
+
             synchronized (writeQueue) {
                 writing = false;
-                writeQueue.pollFirst();
             }
-            log("Não foi possível iniciar write BLE.");
-            if (otaActive) failOta("Fila BLE recusou escrita");
-            mainHandler.postDelayed(this::pumpWrites, 80);
+
+            log("Write BLE ocupado/recusado. código=" + startStatus +
+                    " tentativa=" + task.startAttempts + "/" + MAX_WRITE_START_RETRIES);
+
+            if (task.startAttempts >= MAX_WRITE_START_RETRIES) {
+                synchronized (writeQueue) {
+                    writeQueue.pollFirst();
+                }
+
+                if (!authenticated && !otaActive) {
+                    runOnUiThread(() ->
+                            setState("Falha BLE antes do HELLO • código " + startStatus));
+                }
+
+                if (otaActive) {
+                    failOta("BLE recusou escrita. código=" + startStatus);
+                }
+
+                return;
+            }
+
+            long retryDelay = Math.min(1800L, 180L * task.startAttempts);
+            mainHandler.postDelayed(this::pumpWrites, retryDelay);
         }
     }
 
@@ -1083,6 +1131,7 @@ public class MainActivity extends Activity {
         final BluetoothGattCharacteristic characteristic;
         final byte[] payload;
         final Runnable onSuccess;
+        int startAttempts = 0;
 
         WriteTask(BluetoothGattCharacteristic characteristic,
                   byte[] payload,
