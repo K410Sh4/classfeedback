@@ -530,7 +530,7 @@ class PrivateLinkBleManager(
             return
         }
 
-        val end = (otaOffset + Protocol.OTA_CHUNK).coerceAtMost(firmware.size)
+        val end = (otaOffset + Protocol.BLE_OTA_CHUNK).coerceAtMost(firmware.size)
         val chunk = firmware.copyOfRange(otaOffset, end)
 
         enqueueWrite(characteristic, chunk) {
