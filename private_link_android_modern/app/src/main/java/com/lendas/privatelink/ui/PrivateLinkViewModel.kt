@@ -145,7 +145,7 @@ class PrivateLinkViewModel(application: Application) :
     fun startScan() {
         _state.value = _state.value.copy(
             scanning = true,
-            statusText = "Procurando nós PrivateLink..."
+            statusText = "Procurando nós ESPhub..."
         )
 
         discovery.startScan()
