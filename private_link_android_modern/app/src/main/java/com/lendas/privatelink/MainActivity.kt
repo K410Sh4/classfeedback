@@ -148,6 +148,7 @@ private enum class AppTab(
     Home("Início", Icons.Rounded.Dashboard),
     Nodes("Nós", Icons.Rounded.Memory),
     Research("Pesquisa", Icons.Rounded.Science),
+    Lab("Lab", Icons.Rounded.Timer),
     Update("Atualizar", Icons.Rounded.SystemUpdateAlt),
     Console("Console", Icons.Rounded.Terminal)
 }
@@ -256,6 +257,9 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
                 onDisconnect = vm::disconnect,
                 onDisconnectAll = vm::disconnectAll,
                 onCommand = vm::sendCommand,
+                onStartLab = vm::startLabTest,
+                onStopLab = vm::stopLabTest,
+                onLabStatus = vm::requestLabStatus,
                 onPickFirmware = launchFirmwarePicker,
                 onAbortOta = vm::abortOta,
                 onClearKey = vm::clearPrivateKey
@@ -416,6 +420,17 @@ private fun ModernPrivateLinkApp(
     onDisconnect: (String) -> Unit,
     onDisconnectAll: () -> Unit,
     onCommand: (String, String) -> Unit,
+    onStartLab: (
+        String,
+        String,
+        String,
+        String,
+        Int,
+        Int,
+        Int
+    ) -> Result<Unit>,
+    onStopLab: (String) -> Unit,
+    onLabStatus: (String) -> Unit,
     onPickFirmware: () -> Unit,
     onAbortOta: (String) -> Unit,
     onClearKey: () -> Unit
@@ -553,6 +568,19 @@ private fun ModernPrivateLinkApp(
                             state = state,
                             onSelectNode =
                                 onSelectNode
+                        )
+
+                    AppTab.Lab ->
+                        LabScreen(
+                            state = state,
+                            onSelectNode =
+                                onSelectNode,
+                            onStart =
+                                onStartLab,
+                            onStop =
+                                onStopLab,
+                            onStatus =
+                                onLabStatus
                         )
 
                     AppTab.Update ->
@@ -1105,6 +1133,549 @@ private fun ResearchScreen(
                     )
                 }
             )
+        }
+
+        item {
+            Spacer(
+                Modifier.height(24.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun LabScreen(
+    state: PrivateLinkUiState,
+    onSelectNode: (String) -> Unit,
+    onStart: (
+        String,
+        String,
+        String,
+        String,
+        Int,
+        Int,
+        Int
+    ) -> Result<Unit>,
+    onStop: (String) -> Unit,
+    onStatus: (String) -> Unit
+) {
+    val selected =
+        state.selectedNode
+
+    var ssid by remember {
+        mutableStateOf("")
+    }
+
+    var password by remember {
+        mutableStateOf("")
+    }
+
+    var target by remember {
+        mutableStateOf("")
+    }
+
+    var portText by remember {
+        mutableStateOf("41002")
+    }
+
+    var durationText by remember {
+        mutableStateOf("30")
+    }
+
+    var level by remember {
+        mutableStateOf(1)
+    }
+
+    var localError by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Spacer(
+                Modifier.height(4.dp)
+            )
+
+            SectionTitle(
+                "LabTest V1",
+                "Carga Wi-Fi limitada para laboratório isolado"
+            )
+
+            ModernCard {
+                Text(
+                    "O alvo deve ser o IPv4 privado do PC coletor conectado por Ethernet. " +
+                        "Gateway, broadcast e portas abaixo de 1024 são bloqueados pelo firmware.",
+                    color =
+                        MaterialTheme.colorScheme
+                            .onSurfaceVariant
+                )
+
+                Spacer(
+                    Modifier.height(10.dp)
+                )
+
+                AssistChip(
+                    onClick = {},
+                    label = {
+                        Text(
+                            "Máx. 60 s • 3 níveis • parada automática"
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Rounded.Security,
+                            contentDescription = null,
+                            modifier =
+                                Modifier.size(17.dp)
+                        )
+                    }
+                )
+            }
+        }
+
+        item {
+            SectionTitle(
+                "Nó de teste",
+                "Selecione um firmware com LABTEST_V1"
+            )
+
+            FlowRow(
+                horizontalArrangement =
+                    Arrangement.spacedBy(8.dp),
+                verticalArrangement =
+                    Arrangement.spacedBy(8.dp)
+            ) {
+                state.nodes
+                    .filter {
+                        it.authenticated
+                    }
+                    .forEach { node ->
+                        AssistChip(
+                            onClick = {
+                                onSelectNode(
+                                    node.address
+                                )
+
+                                portText =
+                                    when {
+                                        node.info.model
+                                            ?.contains(
+                                                "S3",
+                                                ignoreCase = true
+                                            ) == true ->
+                                            "41003"
+
+                                        node.info.model
+                                            ?.contains(
+                                                "C6",
+                                                ignoreCase = true
+                                            ) == true ->
+                                            "41002"
+
+                                        else ->
+                                            "41001"
+                                    }
+                            },
+                            label = {
+                                Text(
+                                    node.displayName
+                                )
+                            },
+                            leadingIcon = {
+                                if (
+                                    selected?.address ==
+                                    node.address
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.CheckCircle,
+                                        contentDescription = null,
+                                        modifier =
+                                            Modifier.size(17.dp)
+                                    )
+                                }
+                            }
+                        )
+                    }
+            }
+        }
+
+        if (selected == null) {
+            item {
+                ModernCard {
+                    Text(
+                        "Nenhum nó selecionado",
+                        fontWeight =
+                            FontWeight.SemiBold
+                    )
+
+                    Text(
+                        "Conecte e autentique S3, C6 ou ESP32 DevKit V1.",
+                        color =
+                            MaterialTheme.colorScheme
+                                .onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            item {
+                ModernCard {
+                    NodeHeader(selected)
+
+                    Spacer(
+                        Modifier.height(12.dp)
+                    )
+
+                    val supported =
+                        "LABTEST_V1" in
+                            selected.info.capabilities
+
+                    Text(
+                        if (supported)
+                            "LabTest V1 disponível"
+                        else
+                            "Firmware sem LabTest V1",
+                        color =
+                            if (supported)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.error,
+                        fontWeight =
+                            FontWeight.SemiBold
+                    )
+
+                    Spacer(
+                        Modifier.height(12.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = ssid,
+                        onValueChange = {
+                            ssid = it.take(32)
+                            localError = null
+                        },
+                        label = {
+                            Text("SSID do laboratório")
+                        },
+                        singleLine = true,
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = {
+                            password = it.take(63)
+                            localError = null
+                        },
+                        label = {
+                            Text("Senha Wi-Fi")
+                        },
+                        visualTransformation =
+                            PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = target,
+                        onValueChange = {
+                            target = it
+                                .filter { ch ->
+                                    ch.isDigit() ||
+                                        ch == '.'
+                                }
+                                .take(15)
+                            localError = null
+                        },
+                        label = {
+                            Text("IPv4 do PC coletor")
+                        },
+                        placeholder = {
+                            Text("192.168.1.50")
+                        },
+                        keyboardOptions =
+                            KeyboardOptions(
+                                keyboardType =
+                                    KeyboardType.Number
+                            ),
+                        singleLine = true,
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        horizontalArrangement =
+                            Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = portText,
+                            onValueChange = {
+                                portText =
+                                    it.filter(
+                                        Char::isDigit
+                                    ).take(5)
+                            },
+                            label = {
+                                Text("Porta")
+                            },
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    keyboardType =
+                                        KeyboardType.Number
+                                ),
+                            singleLine = true,
+                            modifier =
+                                Modifier.weight(1f)
+                        )
+
+                        OutlinedTextField(
+                            value = durationText,
+                            onValueChange = {
+                                durationText =
+                                    it.filter(
+                                        Char::isDigit
+                                    ).take(2)
+                            },
+                            label = {
+                                Text("Segundos")
+                            },
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    keyboardType =
+                                        KeyboardType.Number
+                                ),
+                            singleLine = true,
+                            modifier =
+                                Modifier.weight(1f)
+                        )
+                    }
+
+                    Spacer(
+                        Modifier.height(12.dp)
+                    )
+
+                    Text(
+                        "Nível de carga",
+                        fontWeight =
+                            FontWeight.SemiBold
+                    )
+
+                    Spacer(
+                        Modifier.height(6.dp)
+                    )
+
+                    FlowRow(
+                        horizontalArrangement =
+                            Arrangement.spacedBy(8.dp)
+                    ) {
+                        (1..3).forEach { option ->
+                            AssistChip(
+                                onClick = {
+                                    level = option
+                                },
+                                label = {
+                                    Text(
+                                        "Nível $option"
+                                    )
+                                },
+                                leadingIcon = {
+                                    if (level == option) {
+                                        Icon(
+                                            Icons.Rounded.CheckCircle,
+                                            contentDescription = null,
+                                            modifier =
+                                                Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    localError?.let {
+                        Spacer(
+                            Modifier.height(8.dp)
+                        )
+
+                        Text(
+                            it,
+                            color =
+                                MaterialTheme.colorScheme.error
+                        )
+                    }
+
+                    Spacer(
+                        Modifier.height(14.dp)
+                    )
+
+                    if (selected.lab.active) {
+                        OutlinedButton(
+                            onClick = {
+                                onStop(
+                                    selected.address
+                                )
+                            },
+                            modifier =
+                                Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "PARAR TESTE"
+                            )
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                val result =
+                                    onStart(
+                                        selected.address,
+                                        ssid,
+                                        password,
+                                        target,
+                                        portText
+                                            .toIntOrNull()
+                                            ?: 0,
+                                        level,
+                                        durationText
+                                            .toIntOrNull()
+                                            ?: 0
+                                    )
+
+                                localError =
+                                    result.exceptionOrNull()
+                                        ?.message
+                            },
+                            modifier =
+                                Modifier.fillMaxWidth(),
+                            enabled =
+                                supported &&
+                                    selected.authenticated
+                        ) {
+                            Text(
+                                "INICIAR TESTE LIMITADO"
+                            )
+                        }
+                    }
+
+                    Spacer(
+                        Modifier.height(8.dp)
+                    )
+
+                    FilledTonalButton(
+                        onClick = {
+                            onStatus(
+                                selected.address
+                            )
+                        },
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        enabled =
+                            selected.authenticated
+                    ) {
+                        Text(
+                            "Atualizar status"
+                        )
+                    }
+                }
+            }
+
+            item {
+                ModernCard {
+                    Text(
+                        "Telemetria Lab",
+                        fontWeight =
+                            FontWeight.SemiBold
+                    )
+
+                    Spacer(
+                        Modifier.height(10.dp)
+                    )
+
+                    val lab =
+                        selected.lab
+
+                    Text(
+                        "Estado: " +
+                            lab.state
+                    )
+
+                    Text(
+                        "Nível: " +
+                            lab.level
+                    )
+
+                    Text(
+                        "PPS perfil/real: " +
+                            (lab.profilePps
+                                ?.toString()
+                                ?: "-") +
+                            " / " +
+                            (lab.actualPps
+                                ?.toString()
+                                ?: "-")
+                    )
+
+                    Text(
+                        "Pacote: " +
+                            (lab.packetBytes
+                                ?.toString()
+                                ?: "-") +
+                            " bytes"
+                    )
+
+                    Text(
+                        "TX: " +
+                            lab.txPackets +
+                            " pacotes • " +
+                            formatBytes(
+                                lab.txBytes
+                            )
+                    )
+
+                    Text(
+                        "Tempo: " +
+                            (lab.elapsedMs /
+                                1000L) +
+                            " s"
+                    )
+
+                    Text(
+                        "RSSI: " +
+                            (lab.rssi
+                                ?.let { "$it dBm" }
+                                ?: "-")
+                    )
+
+                    lab.reason?.let {
+                        Text(
+                            "Motivo: $it",
+                            color =
+                                MaterialTheme.colorScheme
+                                    .onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
 
         item {
