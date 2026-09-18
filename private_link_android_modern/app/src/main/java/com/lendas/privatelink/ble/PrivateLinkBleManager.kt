@@ -490,7 +490,7 @@ class PrivateLinkBleManager(
                 }
                 enqueueText(controlChar, "HELLO")
             }
-        }, 8_000)
+        }, 12_000)
     }
 
     private fun handleNotification(value: ByteArray) {
@@ -498,16 +498,115 @@ class PrivateLinkBleManager(
         log("S3 → $message")
 
         when {
+            message.startsWith("PROVISION_REQUIRED|") -> {
+                val key = privateKey
+
+                if (key == null) {
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Chave privada não configurada no aplicativo"
+                    )
+                    return
+                }
+
+                val parts = message.split("|")
+
+                if (parts.size < 3) {
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Resposta de provisionamento inválida"
+                    )
+                    return
+                }
+
+                val nonceText = parts[2].trim()
+
+                runCatching {
+                    val nonce = Crypto.hexToBytes(nonceText)
+                    val proof = Crypto.bytesToHex(
+                        Crypto.hmacSha256(key, nonce)
+                    )
+                    val keyHex = Crypto.bytesToHex(key)
+
+                    listener.onLinkState(
+                        LinkState.Authenticating,
+                        "Provisionando chave privada no ESP32-S3..."
+                    )
+
+                    log(
+                        "Firmware novo sem chave local; provisionamento seguro iniciado pelo BLE criptografado."
+                    )
+
+                    enqueueText(
+                        controlChar,
+                        "PROVISION|$keyHex|$proof"
+                    )
+                }.onFailure {
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Falha no provisionamento"
+                    )
+                    log(
+                        "Provisionamento inválido: ${it.message}"
+                    )
+                }
+            }
+
+            message.startsWith("PROVISION_OK|") -> {
+                log(
+                    "ESP32-S3 provisionado. Aguardando novo desafio HMAC..."
+                )
+                listener.onLinkState(
+                    LinkState.Authenticating,
+                    "Chave provisionada • autenticando..."
+                )
+            }
+
+            message.startsWith("PROVISION_LOCKED|") -> {
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Janela de provisionamento encerrada • reinicie o ESP32-S3"
+                )
+                log(
+                    "Provisionamento bloqueado pelo firmware até o próximo reboot."
+                )
+            }
+
+            message.startsWith("PROVISION_ERROR|") -> {
+                listener.onLinkState(
+                    LinkState.Error,
+                    "ESP32-S3 recusou o provisionamento"
+                )
+                log(message)
+            }
+
+            message == "ERR|link_not_encrypted" -> {
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Link BLE não criptografado • refaça o pareamento"
+                )
+                log(
+                    "O ESP32 recusou a operação porque o link BLE não estava criptografado."
+                )
+            }
+
             message.startsWith("HELLO|") -> {
                 val key = privateKey ?: return
                 val nonceText = message.substringAfter("HELLO|").trim()
 
                 runCatching {
                     val nonce = Crypto.hexToBytes(nonceText)
-                    val mac = Crypto.bytesToHex(Crypto.hmacSha256(key, nonce))
-                    enqueueText(controlChar, "AUTH|$mac")
+                    val mac = Crypto.bytesToHex(
+                        Crypto.hmacSha256(key, nonce)
+                    )
+                    enqueueText(
+                        controlChar,
+                        "AUTH|$mac"
+                    )
                 }.onFailure {
-                    log("HELLO inválido: ${it.message}")
+                    log(
+                        "HELLO inválido: ${it.message}"
+                    )
                 }
             }
 
