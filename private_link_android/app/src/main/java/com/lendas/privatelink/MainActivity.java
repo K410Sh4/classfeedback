@@ -1082,8 +1082,9 @@ public class MainActivity extends Activity {
                 }
 
                 if (!authenticated && !otaActive) {
+                    final int finalStartStatus = startStatus;
                     runOnUiThread(() ->
-                            setState("Falha BLE antes do HELLO • código " + startStatus));
+                            setState("Falha BLE antes do HELLO • código " + finalStartStatus));
                 }
 
                 if (otaActive) {
