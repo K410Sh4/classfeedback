@@ -25,6 +25,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import androidx.core.content.ContextCompat
 import com.lendas.privatelink.core.Crypto
 import com.lendas.privatelink.core.LinkState
 import com.lendas.privatelink.core.NearbyDevice
@@ -85,18 +86,27 @@ class PrivateLinkBleManager(
     private var otaFileName: String? = null
     private var otaOffset = 0
     private var waitingOtaReady = false
+    private var receiverRegistered = false
 
     init {
-        context.registerReceiver(
-            bondReceiver,
-            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-        )
+        handler.post {
+            ContextCompat.registerReceiver(
+                context,
+                bondReceiver,
+                IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            receiverRegistered = true
+        }
     }
 
     fun close() {
         stopScan()
         disconnect()
-        runCatching { context.unregisterReceiver(bondReceiver) }
+        if (receiverRegistered) {
+            runCatching { context.unregisterReceiver(bondReceiver) }
+            receiverRegistered = false
+        }
     }
 
     fun setPrivateKey(key: ByteArray?) {
