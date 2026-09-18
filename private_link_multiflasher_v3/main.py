@@ -13,42 +13,57 @@ from tkinter import filedialog, messagebox, ttk
 
 from serial.tools import list_ports
 
-APP_NAME = "LENDAS ESP MultiFlasher"
-APP_VERSION = "3.0.0"
+APP_NAME = "ESPhub MultiFlasher"
+APP_VERSION = "4.0.0"
 
 SUPPORTED_CHIPS = {
+    "ESP32": {
+        "esptool_chip": "esp32",
+        "label": "ESP32 DevKit V1",
+        "accent": "#A78BFA",
+    },
     "ESP32-S3": {
         "esptool_chip": "esp32s3",
-        "label": "ESP32-S3",
+        "label": "ESP32-S3 N16R8",
         "accent": "#5EEAD4",
     },
     "ESP32-C6": {
         "esptool_chip": "esp32c6",
-        "label": "ESP32-C6",
+        "label": "nanoESP32-C6 V1711",
         "accent": "#60A5FA",
     },
 }
 
 KNOWN_FIRMWARE = {
-    "LENDAS_PrivateLink_S3_v1_4_0_FULL.bin": {
+    "ESPhub_S3_v1_5_0_FULL.bin": {
         "chip": "ESP32-S3",
         "kind": "FULL",
-        "sha256": "85f630bcd7e5585e42234a11b918c858dddae648c01567dab1605cd775495850",
+        "sha256": "fe6269e5dc45456f23b138fba27eb7d5a5fc6b26fa87582bbdf8e245497cb58e",
     },
-    "LENDAS_PrivateLink_S3_v1_4_0_OTA.bin": {
+    "ESPhub_S3_v1_5_0_OTA.bin": {
         "chip": "ESP32-S3",
         "kind": "APP",
-        "sha256": "ffbfc624d8cb98e0c1272265c1f8124572385616d2ea883d4af51ac0e4fe01d6",
+        "sha256": "dc3fe39b78902dba0d7b503952711a647bbd10d4a4fd24c1a7df3fe3d875a730",
     },
-    "LENDAS_PrivateLink_C6_v1_0_0_FULL.bin": {
+    "ESPhub_C6_v1_1_0_FULL.bin": {
         "chip": "ESP32-C6",
         "kind": "FULL",
-        "sha256": "3a5b2bbd8368e4e77ac626d3c1abb4ecc735f6ea855c3ef954a6f19b9505d71e",
+        "sha256": "332dac55ad5a4ac17f1d8ca24acfe7d0cd893437fd65ae5099bed296464ec880",
     },
-    "LENDAS_PrivateLink_C6_v1_0_0_OTA.bin": {
+    "ESPhub_C6_v1_1_0_OTA.bin": {
         "chip": "ESP32-C6",
         "kind": "APP",
-        "sha256": "df2a9580ca9084479f719a60dfcf4e7fdce8a386b0a3a5bf2b5f875f39372d8b",
+        "sha256": "99a1f0f401b2cb0cefb22d042036e4e29a14fcac5029e451dbca42757352f85b",
+    },
+    "ESPhub_ESP32_v1_0_0_FULL.bin": {
+        "chip": "ESP32",
+        "kind": "FULL",
+        "sha256": "d72731338192f3489f1c310f5f9d117292a95c838eaba6d585f40958b723b7f6",
+    },
+    "ESPhub_ESP32_v1_0_0_OTA.bin": {
+        "chip": "ESP32",
+        "kind": "APP",
+        "sha256": "3f76d6301363244c9a51ac4cd72620e42c92c30f78d4805f501e91ecf52ab185",
     },
 }
 
@@ -345,14 +360,14 @@ class MultiFlasherApp:
 
         self._label(
             header,
-            text="LENDAS ESP MultiFlasher",
+            text="ESPhub MultiFlasher",
             size=20,
             bold=True,
         ).pack(side="left")
 
         self._label(
             header,
-            text=f"v{APP_VERSION} • S3 + C6",
+            text=f"v{APP_VERSION} • ESP32 + S3 + C6",
             size=10,
             fg=TEXT_MUTED,
         ).pack(side="right", pady=(8, 0))
@@ -571,7 +586,7 @@ class MultiFlasherApp:
         self.log.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         self._log(f"{APP_NAME} v{APP_VERSION}")
-        self._log("Suporte: ESP32-S3 e ESP32-C6.")
+        self._log("Suporte: ESP32 DevKit V1, ESP32-S3 e ESP32-C6.")
         self._log("Selecione a porta e o firmware. O chip será validado antes da gravação.")
 
     def _on_port_changed(self, _event=None):
@@ -712,8 +727,20 @@ class MultiFlasherApp:
         if "ESP32-C6" in upper or "ESP32C6" in upper:
             return "ESP32-C6"
 
+        if (
+            "ESP32" in upper
+            and "ESP32-S3" not in upper
+            and "ESP32S3" not in upper
+            and "ESP32-C6" not in upper
+            and "ESP32C6" not in upper
+        ):
+            return "ESP32"
+
         match = re.search(r"Chip is\s+([^\r\n(]+)", output, re.IGNORECASE)
-        return match.group(1).strip() if match else ""
+        parsed = match.group(1).strip() if match else ""
+        if parsed.upper().startswith("ESP32"):
+            return "ESP32"
+        return parsed
 
     @staticmethod
     def _parse_flash_size(output: str) -> str:
@@ -823,6 +850,8 @@ class MultiFlasherApp:
                 chip_hint = "ESP32-C6"
             elif "S3" in upper_name:
                 chip_hint = "ESP32-S3"
+            elif "ESP32" in upper_name:
+                chip_hint = "ESP32"
 
         return ImageInfo(
             path=path,
