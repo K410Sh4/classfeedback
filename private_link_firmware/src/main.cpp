@@ -1747,6 +1747,8 @@ static void processControl(
 
             notifyText(
                 "PROVISION_REQUIRED|" PL_FW_VERSION "|" +
+                gNodeId +
+                "|" +
                 bytesToHex(
                     gProvisionNonce,
                     sizeof(gProvisionNonce)
@@ -1762,7 +1764,9 @@ static void processControl(
         );
 
         notifyText(
-            "HELLO|" +
+            "HELLO2|" +
+            gNodeId +
+            "|" +
             bytesToHex(
                 gChallenge,
                 sizeof(gChallenge)
@@ -1790,7 +1794,9 @@ static void processControl(
             );
 
             notifyText(
-                "HELLO|" +
+                "HELLO2|" +
+                gNodeId +
+                "|" +
                 bytesToHex(
                     gChallenge,
                     sizeof(gChallenge)
@@ -1859,7 +1865,8 @@ static void processControl(
         gAuthenticated = true;
 
         notifyText(
-            "AUTH_OK|" PL_FW_VERSION
+            "AUTH_OK|" PL_FW_VERSION "|" +
+            gNodeId
         );
 
         return;
