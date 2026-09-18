@@ -1,0 +1,68 @@
+name: Build LENDAS PrivateLink Firmware
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-lendas-private-link-firmware.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout firmware branch
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-private-link-firmware
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ESP32-S3 N16R8 firmware
+        working-directory: private_link_firmware
+        run: pio run -e esp32s3_n16r8
+
+      - name: Collect and merge binaries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BUILD="private_link_firmware/.pio/build/esp32s3_n16r8"
+          mkdir -p out
+          cp "$BUILD/firmware.bin" out/LENDAS_PrivateLink_N16R8_APP_PLACEHOLDER.bin
+          cp "$BUILD/bootloader.bin" out/bootloader.bin
+          cp "$BUILD/partitions.bin" out/partitions.bin
+          BOOT_APP0="$(find ~/.platformio/packages -name boot_app0.bin | head -n 1)"
+          test -n "$BOOT_APP0"
+          cp "$BOOT_APP0" out/boot_app0.bin
+          ESPTOOL="$(find ~/.platformio/packages -type f \( -name esptool.py -o -name esptool \) | head -n 1)"
+          if [ -n "$ESPTOOL" ] && [[ "$ESPTOOL" == *.py ]]; then
+            python "$ESPTOOL" --chip esp32s3 merge_bin -o out/LENDAS_PrivateLink_N16R8_FULL_PLACEHOLDER.bin \
+              0x0 out/bootloader.bin \
+              0x8000 out/partitions.bin \
+              0xE000 out/boot_app0.bin \
+              0x10000 out/LENDAS_PrivateLink_N16R8_APP_PLACEHOLDER.bin
+          else
+            python -m esptool --chip esp32s3 merge_bin -o out/LENDAS_PrivateLink_N16R8_FULL_PLACEHOLDER.bin \
+              0x0 out/bootloader.bin \
+              0x8000 out/partitions.bin \
+              0xE000 out/boot_app0.bin \
+              0x10000 out/LENDAS_PrivateLink_N16R8_APP_PLACEHOLDER.bin
+          fi
+          sha256sum out/*.bin > out/SHA256SUMS.txt
+
+      - name: Upload firmware build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LENDAS_PrivateLink_N16R8_Firmware_Placeholder
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
