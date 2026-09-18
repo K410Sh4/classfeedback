@@ -35,6 +35,11 @@ class PrivateLinkViewModel(application: Application) :
             application
         )
 
+    private val previousExit =
+        PrivateLinkApplication.consumePreviousExit(
+            application
+        )
+
     private val _state = MutableStateFlow(
         PrivateLinkUiState(
             hasPrivateKey = secureKeyStore.hasKey(),
@@ -43,15 +48,17 @@ class PrivateLinkViewModel(application: Application) :
                     "O aplicativo fechou inesperadamente na sessão anterior."
                 else
                     null,
-            logs =
-                if (startupCrash != null)
-                    listOf(
-                        "CRASH DA SESSÃO ANTERIOR:",
-                        startupCrash,
-                        "Pronto."
-                    )
-                else
-                    listOf("Pronto.")
+            logs = buildList {
+                if (previousExit != null) {
+                    add("DIAGNÓSTICO DE SAÍDA ANTERIOR:")
+                    add(previousExit)
+                }
+                if (startupCrash != null) {
+                    add("CRASH DA SESSÃO ANTERIOR:")
+                    add(startupCrash)
+                }
+                add("Pronto.")
+            }
         )
     )
 
