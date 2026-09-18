@@ -1,12 +1,13 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <Update.h>
+#include <Preferences.h>
 #include <mbedtls/md.h>
 #include <esp_system.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-#define FW_VERSION "1.2.1"
+#define FW_VERSION "1.3.0"
 #define BLE_PASSKEY 496110
 
 static const char* SERVICE_UUID =
@@ -18,29 +19,28 @@ static const char* RESPONSE_UUID =
 static const char* OTA_UUID =
     "119cde0a-c330-4ee8-89f2-98daa95897ad";
 
-/*
- * BUILD PLACEHOLDER ONLY.
- * After CI compilation ChatGPT patches these exact 32 bytes in the .bin
- * with the user's private HMAC key. The real key is never committed.
- */
-__attribute__((used))
-static const uint8_t APP_AUTH_KEY[32] = {
-    0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33,
-    0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-    0xCC, 0xDD, 0xEE, 0xFF, 0x10, 0x32, 0x54, 0x76,
-    0x98, 0xBA, 0xDC, 0xFE, 0x13, 0x57, 0x9B, 0xDF
-};
+static const char* PREF_NAMESPACE = "privatelink";
+static const char* PREF_HMAC_KEY = "hmac";
 
 static NimBLEServer* gServer = nullptr;
 static NimBLECharacteristic* gResponse = nullptr;
 static NimBLEAdvertising* gAdvertising = nullptr;
 
 static bool gConnected = false;
+static bool gLinkEncrypted = false;
 static bool gAuthenticated = false;
-static uint8_t gChallenge[16];
+
+static uint8_t gAppAuthKey[32] = {0};
+static bool gProvisioned = false;
+static uint8_t gChallenge[16] = {0};
+static uint8_t gProvisionNonce[16] = {0};
+static uint32_t gProvisionWindowDeadline = 0;
+
 static uint32_t gLastTelemetry = 0;
-static uint32_t gLastResearchSurvey = 0;
-static const uint32_t RESEARCH_SURVEY_INTERVAL_MS = 60000;
+static uint32_t gNextResearchAt = 0;
+static const uint32_t RESEARCH_INTERVAL_MS = 60000;
+static const uint32_t RESEARCH_IDLE_DELAY_MS = 12000;
+static const uint32_t PROVISION_WINDOW_MS = 120000;
 
 struct ResearchStats {
     int wifiApCount = 0;
@@ -72,8 +72,8 @@ static uint8_t gFastOtaToken[32] = {0};
 static bool gOtaActive = false;
 static size_t gOtaSize = 0;
 static size_t gOtaReceived = 0;
-static uint8_t gExpectedSha[32];
-static uint8_t gExpectedHmac[32];
+static uint8_t gExpectedSha[32] = {0};
+static uint8_t gExpectedHmac[32] = {0};
 
 static mbedtls_md_context_t gShaCtx;
 static mbedtls_md_context_t gHmacCtx;
@@ -86,22 +86,37 @@ static int hexNibble(char c) {
     return -1;
 }
 
-static bool hexToBytes(const String& text, uint8_t* out, size_t outLen) {
-    if (text.length() != outLen * 2) return false;
+static bool hexToBytes(
+    const String& text,
+    uint8_t* out,
+    size_t outLen
+) {
+    if (out == nullptr || text.length() != outLen * 2) {
+        return false;
+    }
 
     for (size_t i = 0; i < outLen; ++i) {
         int hi = hexNibble(text[i * 2]);
         int lo = hexNibble(text[i * 2 + 1]);
 
         if (hi < 0 || lo < 0) return false;
-        out[i] = static_cast<uint8_t>((hi << 4) | lo);
+
+        out[i] =
+            static_cast<uint8_t>(
+                (hi << 4) | lo
+            );
     }
 
     return true;
 }
 
-static String bytesToHex(const uint8_t* data, size_t len) {
-    static const char* HEX_CHARS = "0123456789abcdef";
+static String bytesToHex(
+    const uint8_t* data,
+    size_t len
+) {
+    static const char* HEX_CHARS =
+        "0123456789abcdef";
+
     String out;
     out.reserve(len * 2);
 
@@ -127,12 +142,23 @@ static bool constantTimeEqual(
     return diff == 0;
 }
 
-static String fieldAt(const String& input, char delim, int wanted) {
+static String fieldAt(
+    const String& input,
+    char delim,
+    int wanted
+) {
     int begin = 0;
     int current = 0;
 
-    for (int i = 0; i <= static_cast<int>(input.length()); ++i) {
-        if (i == static_cast<int>(input.length()) || input[i] == delim) {
+    for (
+        int i = 0;
+        i <= static_cast<int>(input.length());
+        ++i
+    ) {
+        if (
+            i == static_cast<int>(input.length()) ||
+            input[i] == delim
+        ) {
             if (current == wanted) {
                 return input.substring(begin, i);
             }
@@ -145,33 +171,26 @@ static String fieldAt(const String& input, char delim, int wanted) {
     return "";
 }
 
-static void notifyText(const String& text) {
-    if (!gConnected || gResponse == nullptr) return;
-
-    gResponse->setValue(
-        reinterpret_cast<const uint8_t*>(text.c_str()),
-        text.length()
-    );
-
-    gResponse->notify();
-}
-
-static void fillRandomBytes(uint8_t* data, size_t len) {
+static void fillRandomBytes(
+    uint8_t* data,
+    size_t len
+) {
     if (data == nullptr || len == 0) return;
 
     for (size_t i = 0; i < len; i += 4) {
         uint32_t randomValue = esp_random();
+
         size_t amount = min(
             static_cast<size_t>(4),
             len - i
         );
 
-        memcpy(data + i, &randomValue, amount);
+        memcpy(
+            data + i,
+            &randomValue,
+            amount
+        );
     }
-}
-
-static void makeChallenge() {
-    fillRandomBytes(gChallenge, sizeof(gChallenge));
 }
 
 static String randomAlphaNumeric(size_t len) {
@@ -184,13 +203,57 @@ static String randomAlphaNumeric(size_t len) {
     out.reserve(len);
 
     for (size_t i = 0; i < len; ++i) {
-        uint32_t r = esp_random();
         out += ALPHABET[
-            r % (sizeof(ALPHABET) - 1)
+            esp_random() %
+            (sizeof(ALPHABET) - 1)
         ];
     }
 
     return out;
+}
+
+static void notifyText(const String& text) {
+    if (
+        !gConnected ||
+        gResponse == nullptr
+    ) {
+        return;
+    }
+
+    gResponse->setValue(
+        reinterpret_cast<const uint8_t*>(
+            text.c_str()
+        ),
+        text.length()
+    );
+
+    gResponse->notify();
+}
+
+static void hmacSha256WithKey(
+    const uint8_t key[32],
+    const uint8_t* data,
+    size_t len,
+    uint8_t output[32]
+) {
+    const mbedtls_md_info_t* info =
+        mbedtls_md_info_from_type(
+            MBEDTLS_MD_SHA256
+        );
+
+    if (info == nullptr) {
+        memset(output, 0, 32);
+        return;
+    }
+
+    mbedtls_md_hmac(
+        info,
+        key,
+        32,
+        data,
+        len,
+        output
+    );
 }
 
 static void hmacSha256(
@@ -198,17 +261,89 @@ static void hmacSha256(
     size_t len,
     uint8_t output[32]
 ) {
-    const mbedtls_md_info_t* info =
-        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!gProvisioned) {
+        memset(output, 0, 32);
+        return;
+    }
 
-    mbedtls_md_hmac(
-        info,
-        APP_AUTH_KEY,
-        sizeof(APP_AUTH_KEY),
+    hmacSha256WithKey(
+        gAppAuthKey,
         data,
         len,
         output
     );
+}
+
+static bool loadProvisionedKey() {
+    Preferences prefs;
+
+    if (!prefs.begin(
+            PREF_NAMESPACE,
+            true
+        )) {
+        return false;
+    }
+
+    size_t len =
+        prefs.getBytesLength(
+            PREF_HMAC_KEY
+        );
+
+    if (len != sizeof(gAppAuthKey)) {
+        prefs.end();
+        memset(
+            gAppAuthKey,
+            0,
+            sizeof(gAppAuthKey)
+        );
+        return false;
+    }
+
+    size_t read =
+        prefs.getBytes(
+            PREF_HMAC_KEY,
+            gAppAuthKey,
+            sizeof(gAppAuthKey)
+        );
+
+    prefs.end();
+
+    return read == sizeof(gAppAuthKey);
+}
+
+static bool storeProvisionedKey(
+    const uint8_t key[32]
+) {
+    Preferences prefs;
+
+    if (!prefs.begin(
+            PREF_NAMESPACE,
+            false
+        )) {
+        return false;
+    }
+
+    size_t written =
+        prefs.putBytes(
+            PREF_HMAC_KEY,
+            key,
+            32
+        );
+
+    prefs.end();
+
+    if (written != 32) {
+        return false;
+    }
+
+    memcpy(
+        gAppAuthKey,
+        key,
+        32
+    );
+
+    gProvisioned = true;
+    return true;
 }
 
 static void freeDigests() {
@@ -220,36 +355,60 @@ static void freeDigests() {
 }
 
 static bool startDigests() {
+    if (!gProvisioned) {
+        return false;
+    }
+
     freeDigests();
 
     const mbedtls_md_info_t* info =
-        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+        mbedtls_md_info_from_type(
+            MBEDTLS_MD_SHA256
+        );
 
     if (info == nullptr) return false;
 
     mbedtls_md_init(&gShaCtx);
     mbedtls_md_init(&gHmacCtx);
 
-    if (mbedtls_md_setup(&gShaCtx, info, 0) != 0) {
+    if (
+        mbedtls_md_setup(
+            &gShaCtx,
+            info,
+            0
+        ) != 0
+    ) {
         freeDigests();
         return false;
     }
 
-    if (mbedtls_md_setup(&gHmacCtx, info, 1) != 0) {
-        freeDigests();
-        return false;
-    }
-
-    if (mbedtls_md_starts(&gShaCtx) != 0) {
-        freeDigests();
-        return false;
-    }
-
-    if (mbedtls_md_hmac_starts(
+    if (
+        mbedtls_md_setup(
             &gHmacCtx,
-            APP_AUTH_KEY,
-            sizeof(APP_AUTH_KEY)
-        ) != 0) {
+            info,
+            1
+        ) != 0
+    ) {
+        freeDigests();
+        return false;
+    }
+
+    if (
+        mbedtls_md_starts(
+            &gShaCtx
+        ) != 0
+    ) {
+        freeDigests();
+        return false;
+    }
+
+    if (
+        mbedtls_md_hmac_starts(
+            &gHmacCtx,
+            gAppAuthKey,
+            sizeof(gAppAuthKey)
+        ) != 0
+    ) {
         freeDigests();
         return false;
     }
@@ -269,12 +428,21 @@ static void abortOta(const String& reason) {
     gOtaSize = 0;
     gOtaReceived = 0;
 
-    notifyText("OTA_ERROR|" + reason);
+    notifyText(
+        "OTA_ERROR|" + reason
+    );
 }
 
-static void beginOta(const String& message) {
-    if (!gAuthenticated) {
-        notifyText("ERR|not_authenticated");
+static void beginOta(
+    const String& message
+) {
+    if (
+        !gAuthenticated ||
+        !gProvisioned
+    ) {
+        notifyText(
+            "ERR|not_authenticated"
+        );
         return;
     }
 
@@ -283,36 +451,78 @@ static void beginOta(const String& message) {
         return;
     }
 
-    String sizeText = fieldAt(message, '|', 1);
-    String shaText = fieldAt(message, '|', 2);
-    String hmacText = fieldAt(message, '|', 3);
+    String sizeText =
+        fieldAt(message, '|', 1);
+
+    String shaText =
+        fieldAt(message, '|', 2);
+
+    String hmacText =
+        fieldAt(message, '|', 3);
 
     size_t imageSize =
-        static_cast<size_t>(strtoull(sizeText.c_str(), nullptr, 10));
+        static_cast<size_t>(
+            strtoull(
+                sizeText.c_str(),
+                nullptr,
+                10
+            )
+        );
 
-    if (imageSize == 0 || imageSize > 0x600000) {
-        notifyText("OTA_ERROR|invalid_size");
+    if (
+        imageSize == 0 ||
+        imageSize > 0x600000
+    ) {
+        notifyText(
+            "OTA_ERROR|invalid_size"
+        );
         return;
     }
 
-    if (!hexToBytes(shaText, gExpectedSha, sizeof(gExpectedSha))) {
-        notifyText("OTA_ERROR|invalid_sha");
+    if (
+        !hexToBytes(
+            shaText,
+            gExpectedSha,
+            sizeof(gExpectedSha)
+        )
+    ) {
+        notifyText(
+            "OTA_ERROR|invalid_sha"
+        );
         return;
     }
 
-    if (!hexToBytes(hmacText, gExpectedHmac, sizeof(gExpectedHmac))) {
-        notifyText("OTA_ERROR|invalid_hmac");
+    if (
+        !hexToBytes(
+            hmacText,
+            gExpectedHmac,
+            sizeof(gExpectedHmac)
+        )
+    ) {
+        notifyText(
+            "OTA_ERROR|invalid_hmac"
+        );
         return;
     }
 
     if (!startDigests()) {
-        notifyText("OTA_ERROR|digest_init");
+        notifyText(
+            "OTA_ERROR|digest_init"
+        );
         return;
     }
 
-    if (!Update.begin(imageSize, U_FLASH)) {
+    if (
+        !Update.begin(
+            imageSize,
+            U_FLASH
+        )
+    ) {
         freeDigests();
-        notifyText("OTA_ERROR|update_begin");
+
+        notifyText(
+            "OTA_ERROR|update_begin"
+        );
         return;
     }
 
@@ -320,28 +530,56 @@ static void beginOta(const String& message) {
     gOtaSize = imageSize;
     gOtaReceived = 0;
 
-    notifyText("OTA_READY|" + String(imageSize));
+    notifyText(
+        "OTA_READY|" +
+        String(imageSize)
+    );
 }
 
-static void receiveOtaData(const uint8_t* data, size_t len) {
-    if (!gAuthenticated || !gOtaActive || data == nullptr || len == 0) {
+static void receiveOtaData(
+    const uint8_t* data,
+    size_t len
+) {
+    if (
+        !gAuthenticated ||
+        !gProvisioned ||
+        !gOtaActive ||
+        data == nullptr ||
+        len == 0
+    ) {
         return;
     }
 
-    if (gOtaReceived + len > gOtaSize) {
+    if (
+        gOtaReceived + len >
+        gOtaSize
+    ) {
         abortOta("overflow");
         return;
     }
 
-    size_t written = Update.write(const_cast<uint8_t*>(data), len);
+    size_t written =
+        Update.write(
+            const_cast<uint8_t*>(data),
+            len
+        );
 
     if (written != len) {
         abortOta("write_failed");
         return;
     }
 
-    mbedtls_md_update(&gShaCtx, data, len);
-    mbedtls_md_hmac_update(&gHmacCtx, data, len);
+    mbedtls_md_update(
+        &gShaCtx,
+        data,
+        len
+    );
+
+    mbedtls_md_hmac_update(
+        &gHmacCtx,
+        data,
+        len
+    );
 
     gOtaReceived += len;
 
@@ -359,12 +597,20 @@ static void receiveOtaData(const uint8_t* data, size_t len) {
 }
 
 static void finishOta() {
-    if (!gAuthenticated || !gOtaActive) {
-        notifyText("OTA_ERROR|not_active");
+    if (
+        !gAuthenticated ||
+        !gOtaActive
+    ) {
+        notifyText(
+            "OTA_ERROR|not_active"
+        );
         return;
     }
 
-    if (gOtaReceived != gOtaSize) {
+    if (
+        gOtaReceived !=
+        gOtaSize
+    ) {
         abortOta("size_mismatch");
         return;
     }
@@ -372,24 +618,46 @@ static void finishOta() {
     uint8_t actualSha[32];
     uint8_t actualHmac[32];
 
-    if (mbedtls_md_finish(&gShaCtx, actualSha) != 0) {
+    if (
+        mbedtls_md_finish(
+            &gShaCtx,
+            actualSha
+        ) != 0
+    ) {
         abortOta("sha_finish");
         return;
     }
 
-    if (mbedtls_md_hmac_finish(&gHmacCtx, actualHmac) != 0) {
+    if (
+        mbedtls_md_hmac_finish(
+            &gHmacCtx,
+            actualHmac
+        ) != 0
+    ) {
         abortOta("hmac_finish");
         return;
     }
 
     freeDigests();
 
-    if (!constantTimeEqual(actualSha, gExpectedSha, 32)) {
+    if (
+        !constantTimeEqual(
+            actualSha,
+            gExpectedSha,
+            32
+        )
+    ) {
         abortOta("sha_mismatch");
         return;
     }
 
-    if (!constantTimeEqual(actualHmac, gExpectedHmac, 32)) {
+    if (
+        !constantTimeEqual(
+            actualHmac,
+            gExpectedHmac,
+            32
+        )
+    ) {
         abortOta("hmac_mismatch");
         return;
     }
@@ -401,33 +669,64 @@ static void finishOta() {
 
     gOtaActive = false;
 
-    notifyText("OTA_OK|firmware.bin|rebooting");
+    notifyText(
+        "OTA_OK|firmware.bin|rebooting"
+    );
 
     delay(700);
     ESP.restart();
 }
 
+static void wifiOff() {
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+    delay(20);
+}
+
 static void runWifiSurvey() {
-    if (gOtaActive || gFastOtaActive) return;
+    if (
+        gConnected ||
+        gOtaActive ||
+        gFastOtaActive
+    ) {
+        return;
+    }
+
+    WiFi.mode(WIFI_STA);
+    delay(80);
 
     wifi_scan_config_t config = {};
     config.ssid = nullptr;
     config.bssid = nullptr;
     config.channel = 0;
     config.show_hidden = true;
-    config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
-    config.scan_time.passive = 80;
+    config.scan_type =
+        WIFI_SCAN_TYPE_PASSIVE;
+    config.scan_time.passive = 60;
 
-    esp_err_t err = esp_wifi_scan_start(&config, true);
+    esp_err_t err =
+        esp_wifi_scan_start(
+            &config,
+            true
+        );
+
     if (err != ESP_OK) {
-        Serial.printf("WiFi passive survey failed: %d\n", static_cast<int>(err));
+        Serial.printf(
+            "WiFi passive survey failed: %d\n",
+            static_cast<int>(err)
+        );
+
+        wifiOff();
         return;
     }
 
     uint16_t count = 0;
     esp_wifi_scan_get_ap_num(&count);
 
-    gResearch.wifiApCount = static_cast<int>(count);
+    gResearch.wifiApCount =
+        static_cast<int>(count);
+
     gResearch.wifiOpenCount = 0;
     gResearch.wifiSecureCount = 0;
     gResearch.wifiBestRssi = -127;
@@ -435,41 +734,89 @@ static void runWifiSurvey() {
     gResearch.wifiPeakChannelCount = 0;
 
     int channelCounts[15] = {0};
-    memset(gWifiChannelCounts, 0, sizeof(gWifiChannelCounts));
+
+    memset(
+        gWifiChannelCounts,
+        0,
+        sizeof(gWifiChannelCounts)
+    );
 
     if (count > 0) {
         wifi_ap_record_t* records =
-            static_cast<wifi_ap_record_t*>(calloc(count, sizeof(wifi_ap_record_t)));
+            static_cast<wifi_ap_record_t*>(
+                calloc(
+                    count,
+                    sizeof(wifi_ap_record_t)
+                )
+            );
 
         if (records != nullptr) {
             uint16_t fetched = count;
 
-            if (esp_wifi_scan_get_ap_records(&fetched, records) == ESP_OK) {
-                gResearch.wifiApCount = static_cast<int>(fetched);
+            if (
+                esp_wifi_scan_get_ap_records(
+                    &fetched,
+                    records
+                ) == ESP_OK
+            ) {
+                gResearch.wifiApCount =
+                    static_cast<int>(
+                        fetched
+                    );
 
-                for (uint16_t i = 0; i < fetched; ++i) {
-                    const wifi_ap_record_t& ap = records[i];
+                for (
+                    uint16_t i = 0;
+                    i < fetched;
+                    ++i
+                ) {
+                    const wifi_ap_record_t& ap =
+                        records[i];
 
-                    if (ap.rssi > gResearch.wifiBestRssi) {
-                        gResearch.wifiBestRssi = ap.rssi;
+                    if (
+                        ap.rssi >
+                        gResearch.wifiBestRssi
+                    ) {
+                        gResearch.wifiBestRssi =
+                            ap.rssi;
                     }
 
-                    if (ap.authmode == WIFI_AUTH_OPEN) {
+                    if (
+                        ap.authmode ==
+                        WIFI_AUTH_OPEN
+                    ) {
                         ++gResearch.wifiOpenCount;
                     } else {
                         ++gResearch.wifiSecureCount;
                     }
 
-                    if (ap.primary >= 1 && ap.primary <= 14) {
-                        ++channelCounts[ap.primary];
-                        ++gWifiChannelCounts[ap.primary - 1];
+                    if (
+                        ap.primary >= 1 &&
+                        ap.primary <= 14
+                    ) {
+                        ++channelCounts[
+                            ap.primary
+                        ];
+
+                        ++gWifiChannelCounts[
+                            ap.primary - 1
+                        ];
                     }
                 }
 
-                for (int channel = 1; channel <= 14; ++channel) {
-                    if (channelCounts[channel] > gResearch.wifiPeakChannelCount) {
-                        gResearch.wifiPeakChannelCount = channelCounts[channel];
-                        gResearch.wifiPeakChannel = channel;
+                for (
+                    int channel = 1;
+                    channel <= 14;
+                    ++channel
+                ) {
+                    if (
+                        channelCounts[channel] >
+                        gResearch.wifiPeakChannelCount
+                    ) {
+                        gResearch.wifiPeakChannelCount =
+                            channelCounts[channel];
+
+                        gResearch.wifiPeakChannel =
+                            channel;
                     }
                 }
             }
@@ -479,49 +826,89 @@ static void runWifiSurvey() {
     }
 
     esp_wifi_clear_ap_list();
+    wifiOff();
 }
 
 static void runBleSurvey() {
-    if (gOtaActive || gFastOtaActive) return;
+    if (
+        gConnected ||
+        gOtaActive ||
+        gFastOtaActive
+    ) {
+        return;
+    }
 
-    NimBLEScan* scan = NimBLEDevice::getScan();
+    if (gAdvertising != nullptr) {
+        gAdvertising->stop();
+    }
+
+    NimBLEScan* scan =
+        NimBLEDevice::getScan();
 
     scan->stop();
     scan->clearResults();
     scan->setActiveScan(false);
     scan->setInterval(120);
-    scan->setWindow(60);
+    scan->setWindow(55);
     scan->setMaxResults(80);
 
-    NimBLEScanResults results = scan->getResults(2500, false);
+    NimBLEScanResults results =
+        scan->getResults(
+            1500,
+            false
+        );
 
-    gResearch.bleSeenCount = results.getCount();
+    gResearch.bleSeenCount =
+        results.getCount();
+
     gResearch.bleBestRssi = -127;
 
-    for (int i = 0; i < results.getCount(); ++i) {
-        const NimBLEAdvertisedDevice* device = results.getDevice(i);
+    for (
+        int i = 0;
+        i < results.getCount();
+        ++i
+    ) {
+        const NimBLEAdvertisedDevice* device =
+            results.getDevice(i);
 
-        if (device != nullptr && device->getRSSI() > gResearch.bleBestRssi) {
-            gResearch.bleBestRssi = device->getRSSI();
+        if (
+            device != nullptr &&
+            device->getRSSI() >
+            gResearch.bleBestRssi
+        ) {
+            gResearch.bleBestRssi =
+                device->getRSSI();
         }
     }
 
     scan->clearResults();
 
-    if (gAdvertising != nullptr && !gConnected) {
+    if (
+        gAdvertising != nullptr &&
+        !gConnected
+    ) {
         gAdvertising->start();
     }
 }
 
 static void runResearchSurvey() {
-    if (gOtaActive || gFastOtaActive) return;
+    if (
+        gConnected ||
+        gOtaActive ||
+        gFastOtaActive
+    ) {
+        return;
+    }
 
     runWifiSurvey();
-    delay(40);
+
+    if (gConnected) return;
+
+    delay(30);
     runBleSurvey();
 
-    gResearch.lastSurveyMs = millis();
-    gLastResearchSurvey = millis();
+    gResearch.lastSurveyMs =
+        millis();
 
     Serial.printf(
         "Research survey: wifi=%d open=%d secure=%d best=%d peak_ch=%d ble=%d ble_best=%d\n",
@@ -536,37 +923,100 @@ static void runResearchSurvey() {
 }
 
 static String telemetryText() {
-    String text = "TEL|fw=" FW_VERSION;
-    text += "|uptime_ms=" + String(millis());
-    text += "|heap=" + String(ESP.getFreeHeap());
-    text += "|battery_v=na";
-    text += "|ota=";
-    text += gOtaActive ? "1" : "0";
-    text += "|fast_ota=";
-    text += gFastOtaActive ? "1" : "0";
+    String text =
+        "TEL|fw=" FW_VERSION;
 
-    text += "|wifi_ap=" + String(gResearch.wifiApCount);
-    text += "|wifi_open=" + String(gResearch.wifiOpenCount);
-    text += "|wifi_secure=" + String(gResearch.wifiSecureCount);
-    text += "|wifi_best=" + String(gResearch.wifiBestRssi);
-    text += "|wifi_peak_ch=" + String(gResearch.wifiPeakChannel);
-    text += "|wifi_peak_n=" + String(gResearch.wifiPeakChannelCount);
-    text += "|ble_seen=" + String(gResearch.bleSeenCount);
-    text += "|ble_best=" + String(gResearch.bleBestRssi);
+    text +=
+        "|uptime_ms=" +
+        String(millis());
+
+    text +=
+        "|heap=" +
+        String(ESP.getFreeHeap());
+
+    text += "|battery_v=na";
+
+    text += "|ota=";
+    text +=
+        gOtaActive ? "1" : "0";
+
+    text += "|fast_ota=";
+    text +=
+        gFastOtaActive ? "1" : "0";
+
+    text += "|provisioned=";
+    text +=
+        gProvisioned ? "1" : "0";
+
+    text += "|wifi_ap=" +
+        String(gResearch.wifiApCount);
+
+    text += "|wifi_open=" +
+        String(gResearch.wifiOpenCount);
+
+    text += "|wifi_secure=" +
+        String(gResearch.wifiSecureCount);
+
+    text += "|wifi_best=" +
+        String(gResearch.wifiBestRssi);
+
+    text += "|wifi_peak_ch=" +
+        String(gResearch.wifiPeakChannel);
+
+    text += "|wifi_peak_n=" +
+        String(gResearch.wifiPeakChannelCount);
+
+    text += "|ble_seen=" +
+        String(gResearch.bleSeenCount);
+
+    text += "|ble_best=" +
+        String(gResearch.bleBestRssi);
+
     text += "|survey_age_ms=" +
-        String(gResearch.lastSurveyMs == 0 ? 0 : millis() - gResearch.lastSurveyMs);
+        String(
+            gResearch.lastSurveyMs == 0
+                ? 0
+                : millis() -
+                    gResearch.lastSurveyMs
+        );
 
     return text;
 }
 
 static int chooseFastOtaChannel() {
-    static const int candidates[] = {1, 6, 11};
+    static const int candidates[] = {
+        1,
+        6,
+        11
+    };
+
+    uint32_t total = 0;
+
+    for (
+        int channel :
+        candidates
+    ) {
+        total +=
+            gWifiChannelCounts[
+                channel - 1
+            ];
+    }
+
+    if (total == 0) {
+        return 6;
+    }
 
     int bestChannel = 6;
     uint16_t bestCount = UINT16_MAX;
 
-    for (int channel : candidates) {
-        uint16_t count = gWifiChannelCounts[channel - 1];
+    for (
+        int channel :
+        candidates
+    ) {
+        uint16_t count =
+            gWifiChannelCounts[
+                channel - 1
+            ];
 
         if (count < bestCount) {
             bestCount = count;
@@ -581,19 +1031,22 @@ static void stopFastOtaSession() {
     if (!gFastOtaActive) return;
 
     gFastOtaServer.stop();
-    WiFi.softAPdisconnect(true);
-    delay(40);
-
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, false);
+    wifiOff();
 
     gFastOtaActive = false;
     gFastOtaStartedAt = 0;
     gFastOtaSsid = "";
     gFastOtaPassword = "";
-    memset(gFastOtaToken, 0, sizeof(gFastOtaToken));
 
-    gLastResearchSurvey = millis();
+    memset(
+        gFastOtaToken,
+        0,
+        sizeof(gFastOtaToken)
+    );
+
+    gNextResearchAt =
+        millis() +
+        RESEARCH_IDLE_DELAY_MS;
 }
 
 static void failFastOtaClient(
@@ -611,60 +1064,114 @@ static void failFastOtaClient(
     delay(50);
     client.stop();
 
-    notifyText("FAST_OTA_ERROR|" + reason);
+    notifyText(
+        "FAST_OTA_ERROR|" +
+        reason
+    );
+
     stopFastOtaSession();
 }
 
 static void startFastOtaSession() {
-    if (!gAuthenticated) {
-        notifyText("ERR|not_authenticated");
+    if (
+        !gAuthenticated ||
+        !gProvisioned
+    ) {
+        notifyText(
+            "ERR|not_authenticated"
+        );
         return;
     }
 
-    if (gOtaActive || gFastOtaActive) {
-        notifyText("FAST_OTA_ERROR|busy");
+    if (
+        gOtaActive ||
+        gFastOtaActive
+    ) {
+        notifyText(
+            "FAST_OTA_ERROR|busy"
+        );
         return;
     }
 
-    gFastOtaChannel = chooseFastOtaChannel();
+    gFastOtaChannel =
+        chooseFastOtaChannel();
 
     uint8_t ssidEntropy[4];
-    fillRandomBytes(ssidEntropy, sizeof(ssidEntropy));
+    fillRandomBytes(
+        ssidEntropy,
+        sizeof(ssidEntropy)
+    );
 
     gFastOtaSsid =
         "PL-" +
-        bytesToHex(ssidEntropy, sizeof(ssidEntropy));
+        bytesToHex(
+            ssidEntropy,
+            sizeof(ssidEntropy)
+        );
 
-    gFastOtaPassword = randomAlphaNumeric(20);
+    gFastOtaPassword =
+        randomAlphaNumeric(20);
 
     fillRandomBytes(
         gFastOtaToken,
         sizeof(gFastOtaToken)
     );
 
-    WiFi.mode(WIFI_AP_STA);
+    WiFi.mode(WIFI_AP);
+    delay(60);
 
-    IPAddress localIp(192, 168, 4, 1);
-    IPAddress gateway(192, 168, 4, 1);
-    IPAddress subnet(255, 255, 255, 0);
+    IPAddress localIp(
+        192,
+        168,
+        4,
+        1
+    );
 
-    if (!WiFi.softAPConfig(localIp, gateway, subnet)) {
-        notifyText("FAST_OTA_ERROR|ap_config");
-        WiFi.mode(WIFI_STA);
+    IPAddress gateway(
+        192,
+        168,
+        4,
+        1
+    );
+
+    IPAddress subnet(
+        255,
+        255,
+        255,
+        0
+    );
+
+    if (
+        !WiFi.softAPConfig(
+            localIp,
+            gateway,
+            subnet
+        )
+    ) {
+        notifyText(
+            "FAST_OTA_ERROR|ap_config"
+        );
+
+        wifiOff();
         return;
     }
 
-    const bool hiddenSsid = true;
+    const bool hiddenSsid = false;
 
-    if (!WiFi.softAP(
+    if (
+        !WiFi.softAP(
             gFastOtaSsid.c_str(),
             gFastOtaPassword.c_str(),
             gFastOtaChannel,
             hiddenSsid,
             1
-        )) {
-        notifyText("FAST_OTA_ERROR|ap_start");
-        WiFi.mode(WIFI_STA);
+        )
+    ) {
+        notifyText(
+            "FAST_OTA_ERROR|ap_start"
+        );
+
+        wifiOff();
         return;
     }
 
@@ -674,25 +1181,36 @@ static void startFastOtaSession() {
     gFastOtaActive = true;
     gFastOtaStartedAt = millis();
 
-    String response = "FAST_OTA_READY|";
+    String response =
+        "FAST_OTA_READY|";
+
     response += gFastOtaSsid;
     response += "|";
     response += gFastOtaPassword;
     response += "|";
-    response += bytesToHex(
-        gFastOtaToken,
-        sizeof(gFastOtaToken)
-    );
-    response += "|192.168.4.1|";
-    response += String(FAST_OTA_PORT);
+
+    response +=
+        bytesToHex(
+            gFastOtaToken,
+            sizeof(gFastOtaToken)
+        );
+
+    response +=
+        "|192.168.4.1|";
+
+    response +=
+        String(FAST_OTA_PORT);
+
     response += "|";
-    response += String(gFastOtaChannel);
-    response += "|1";
+    response +=
+        String(gFastOtaChannel);
+
+    response += "|0";
 
     notifyText(response);
 
     Serial.printf(
-        "Fast OTA ready: channel=%d hidden=1\n",
+        "Fast OTA ready: channel=%d hidden=0\n",
         gFastOtaChannel
     );
 }
@@ -703,47 +1221,73 @@ static bool parseFastOtaHeader(
     uint8_t expectedSha[32],
     uint8_t expectedHmac[32]
 ) {
-    if (fieldAt(header, '|', 0) != "PL_OTA_V1") {
+    if (
+        fieldAt(
+            header,
+            '|',
+            0
+        ) != "PL_OTA_V1"
+    ) {
         return false;
     }
 
-    String sizeText = fieldAt(header, '|', 1);
-    String shaText = fieldAt(header, '|', 2);
-    String hmacText = fieldAt(header, '|', 3);
-    String tokenText = fieldAt(header, '|', 4);
+    String sizeText =
+        fieldAt(header, '|', 1);
+
+    String shaText =
+        fieldAt(header, '|', 2);
+
+    String hmacText =
+        fieldAt(header, '|', 3);
+
+    String tokenText =
+        fieldAt(header, '|', 4);
 
     imageSize =
         static_cast<size_t>(
-            strtoull(sizeText.c_str(), nullptr, 10)
+            strtoull(
+                sizeText.c_str(),
+                nullptr,
+                10
+            )
         );
 
-    if (imageSize == 0 || imageSize > 0x600000) {
+    if (
+        imageSize == 0 ||
+        imageSize > 0x600000
+    ) {
         return false;
     }
 
-    if (!hexToBytes(
+    if (
+        !hexToBytes(
             shaText,
             expectedSha,
             32
-        )) {
+        )
+    ) {
         return false;
     }
 
-    if (!hexToBytes(
+    if (
+        !hexToBytes(
             hmacText,
             expectedHmac,
             32
-        )) {
+        )
+    ) {
         return false;
     }
 
     uint8_t suppliedToken[32];
 
-    if (!hexToBytes(
+    if (
+        !hexToBytes(
             tokenText,
             suppliedToken,
             sizeof(suppliedToken)
-        )) {
+        )
+    ) {
         return false;
     }
 
@@ -758,35 +1302,47 @@ static void serviceFastOta() {
     if (!gFastOtaActive) return;
 
     if (
-        millis() - gFastOtaStartedAt >
+        millis() -
+        gFastOtaStartedAt >
         FAST_OTA_TIMEOUT_MS
     ) {
-        notifyText("FAST_OTA_ERROR|timeout");
+        notifyText(
+            "FAST_OTA_ERROR|timeout"
+        );
+
         stopFastOtaSession();
         return;
     }
 
-    WiFiClient client = gFastOtaServer.available();
+    WiFiClient client =
+        gFastOtaServer.available();
 
     if (!client) return;
 
     client.setNoDelay(true);
     client.setTimeout(10);
 
-    String header = client.readStringUntil('\n');
+    String header =
+        client.readStringUntil('\n');
+
     header.trim();
 
     size_t imageSize = 0;
     uint8_t expectedSha[32];
     uint8_t expectedHmac[32];
 
-    if (!parseFastOtaHeader(
+    if (
+        !parseFastOtaHeader(
             header,
             imageSize,
             expectedSha,
             expectedHmac
-        )) {
-        client.print("ERROR|auth_or_header\n");
+        )
+    ) {
+        client.print(
+            "ERROR|auth_or_header\n"
+        );
+
         client.flush();
         delay(30);
         client.stop();
@@ -794,16 +1350,28 @@ static void serviceFastOta() {
     }
 
     if (!startDigests()) {
-        client.print("ERROR|digest_init\n");
+        client.print(
+            "ERROR|digest_init\n"
+        );
+
         client.flush();
         client.stop();
         stopFastOtaSession();
         return;
     }
 
-    if (!Update.begin(imageSize, U_FLASH)) {
+    if (
+        !Update.begin(
+            imageSize,
+            U_FLASH
+        )
+    ) {
         freeDigests();
-        client.print("ERROR|update_begin\n");
+
+        client.print(
+            "ERROR|update_begin\n"
+        );
+
         client.flush();
         client.stop();
         stopFastOtaSession();
@@ -814,25 +1382,37 @@ static void serviceFastOta() {
     client.flush();
 
     uint8_t* buffer =
-        static_cast<uint8_t*>(malloc(8192));
+        static_cast<uint8_t*>(
+            malloc(8192)
+        );
 
     if (buffer == nullptr) {
-        failFastOtaClient(client, "no_memory");
+        failFastOtaClient(
+            client,
+            "no_memory"
+        );
         return;
     }
 
     size_t received = 0;
-    uint32_t lastDataAt = millis();
+    uint32_t lastDataAt =
+        millis();
 
     while (
         received < imageSize &&
         client.connected()
     ) {
-        int available = client.available();
+        int available =
+            client.available();
 
         if (available <= 0) {
-            if (millis() - lastDataAt > 15000) {
+            if (
+                millis() -
+                lastDataAt >
+                15000
+            ) {
                 free(buffer);
+
                 failFastOtaClient(
                     client,
                     "data_timeout"
@@ -845,14 +1425,22 @@ static void serviceFastOta() {
         }
 
         size_t wanted = min(
-            static_cast<size_t>(available),
+            static_cast<size_t>(
+                available
+            ),
             min(
-                static_cast<size_t>(8192),
+                static_cast<size_t>(
+                    8192
+                ),
                 imageSize - received
             )
         );
 
-        int got = client.read(buffer, wanted);
+        int got =
+            client.read(
+                buffer,
+                wanted
+            );
 
         if (got <= 0) {
             delay(1);
@@ -862,10 +1450,17 @@ static void serviceFastOta() {
         lastDataAt = millis();
 
         size_t written =
-            Update.write(buffer, got);
+            Update.write(
+                buffer,
+                got
+            );
 
-        if (written != static_cast<size_t>(got)) {
+        if (
+            written !=
+            static_cast<size_t>(got)
+        ) {
             free(buffer);
+
             failFastOtaClient(
                 client,
                 "write_failed"
@@ -901,48 +1496,74 @@ static void serviceFastOta() {
     uint8_t actualSha[32];
     uint8_t actualHmac[32];
 
-    if (mbedtls_md_finish(
+    if (
+        mbedtls_md_finish(
             &gShaCtx,
             actualSha
-        ) != 0) {
-        failFastOtaClient(client, "sha_finish");
+        ) != 0
+    ) {
+        failFastOtaClient(
+            client,
+            "sha_finish"
+        );
         return;
     }
 
-    if (mbedtls_md_hmac_finish(
+    if (
+        mbedtls_md_hmac_finish(
             &gHmacCtx,
             actualHmac
-        ) != 0) {
-        failFastOtaClient(client, "hmac_finish");
+        ) != 0
+    ) {
+        failFastOtaClient(
+            client,
+            "hmac_finish"
+        );
         return;
     }
 
     freeDigests();
 
-    if (!constantTimeEqual(
+    if (
+        !constantTimeEqual(
             actualSha,
             expectedSha,
             32
-        )) {
-        failFastOtaClient(client, "sha_mismatch");
+        )
+    ) {
+        failFastOtaClient(
+            client,
+            "sha_mismatch"
+        );
         return;
     }
 
-    if (!constantTimeEqual(
+    if (
+        !constantTimeEqual(
             actualHmac,
             expectedHmac,
             32
-        )) {
-        failFastOtaClient(client, "hmac_mismatch");
+        )
+    ) {
+        failFastOtaClient(
+            client,
+            "hmac_mismatch"
+        );
         return;
     }
 
     if (!Update.end(true)) {
-        failFastOtaClient(client, "update_end");
+        failFastOtaClient(
+            client,
+            "update_end"
+        );
         return;
     }
 
-    client.print("OK|" FW_VERSION "\n");
+    client.print(
+        "OK|" FW_VERSION "\n"
+    );
+
     client.flush();
 
     notifyText(
@@ -956,25 +1577,224 @@ static void serviceFastOta() {
     ESP.restart();
 }
 
-static void processControl(const String& message) {
+static bool handleProvision(
+    const String& message
+) {
+    if (gProvisioned) {
+        notifyText(
+            "PROVISION_ERROR|already_provisioned"
+        );
+        return false;
+    }
+
+    if (
+        static_cast<int32_t>(
+            millis() -
+            gProvisionWindowDeadline
+        ) > 0
+    ) {
+        notifyText(
+            "PROVISION_LOCKED|reboot_required"
+        );
+        return false;
+    }
+
+    String keyText =
+        fieldAt(
+            message,
+            '|',
+            1
+        );
+
+    String proofText =
+        fieldAt(
+            message,
+            '|',
+            2
+        );
+
+    uint8_t candidateKey[32];
+    uint8_t suppliedProof[32];
+
+    if (
+        !hexToBytes(
+            keyText,
+            candidateKey,
+            sizeof(candidateKey)
+        ) ||
+        !hexToBytes(
+            proofText,
+            suppliedProof,
+            sizeof(suppliedProof)
+        )
+    ) {
+        notifyText(
+            "PROVISION_ERROR|format"
+        );
+        return false;
+    }
+
+    uint8_t expectedProof[32];
+
+    hmacSha256WithKey(
+        candidateKey,
+        gProvisionNonce,
+        sizeof(gProvisionNonce),
+        expectedProof
+    );
+
+    if (
+        !constantTimeEqual(
+            suppliedProof,
+            expectedProof,
+            sizeof(expectedProof)
+        )
+    ) {
+        notifyText(
+            "PROVISION_ERROR|proof"
+        );
+        return false;
+    }
+
+    if (
+        !storeProvisionedKey(
+            candidateKey
+        )
+    ) {
+        notifyText(
+            "PROVISION_ERROR|storage"
+        );
+        return false;
+    }
+
+    memset(
+        candidateKey,
+        0,
+        sizeof(candidateKey)
+    );
+
+    memset(
+        suppliedProof,
+        0,
+        sizeof(suppliedProof)
+    );
+
+    memset(
+        expectedProof,
+        0,
+        sizeof(expectedProof)
+    );
+
+    notifyText(
+        "PROVISION_OK|" FW_VERSION
+    );
+
+    Serial.println(
+        "PrivateLink HMAC key provisioned to NVS."
+    );
+
+    return true;
+}
+
+static void processControl(
+    const String& message
+) {
     if (message == "HELLO") {
-        makeChallenge();
         gAuthenticated = false;
+
+        if (!gProvisioned) {
+            fillRandomBytes(
+                gProvisionNonce,
+                sizeof(gProvisionNonce)
+            );
+
+            notifyText(
+                "PROVISION_REQUIRED|" FW_VERSION "|" +
+                bytesToHex(
+                    gProvisionNonce,
+                    sizeof(gProvisionNonce)
+                )
+            );
+
+            return;
+        }
+
+        fillRandomBytes(
+            gChallenge,
+            sizeof(gChallenge)
+        );
 
         notifyText(
             "HELLO|" +
-            bytesToHex(gChallenge, sizeof(gChallenge))
+            bytesToHex(
+                gChallenge,
+                sizeof(gChallenge)
+            )
         );
 
         return;
     }
 
-    if (message.startsWith("AUTH|")) {
-        String suppliedText = fieldAt(message, '|', 1);
+    if (
+        message.startsWith(
+            "PROVISION|"
+        )
+    ) {
+        if (
+            handleProvision(
+                message
+            )
+        ) {
+            delay(50);
+
+            fillRandomBytes(
+                gChallenge,
+                sizeof(gChallenge)
+            );
+
+            notifyText(
+                "HELLO|" +
+                bytesToHex(
+                    gChallenge,
+                    sizeof(gChallenge)
+                )
+            );
+        }
+
+        return;
+    }
+
+    if (
+        message.startsWith(
+            "AUTH|"
+        )
+    ) {
+        if (!gProvisioned) {
+            notifyText(
+                "AUTH_FAIL|not_provisioned"
+            );
+            return;
+        }
+
+        String suppliedText =
+            fieldAt(
+                message,
+                '|',
+                1
+            );
+
         uint8_t supplied[32];
 
-        if (!hexToBytes(suppliedText, supplied, sizeof(supplied))) {
-            notifyText("AUTH_FAIL|format");
+        if (
+            !hexToBytes(
+                suppliedText,
+                supplied,
+                sizeof(supplied)
+            )
+        ) {
+            notifyText(
+                "AUTH_FAIL|format"
+            );
             return;
         }
 
@@ -986,28 +1806,47 @@ static void processControl(const String& message) {
             expected
         );
 
-        if (!constantTimeEqual(supplied, expected, sizeof(expected))) {
-            notifyText("AUTH_FAIL|hmac");
+        if (
+            !constantTimeEqual(
+                supplied,
+                expected,
+                sizeof(expected)
+            )
+        ) {
+            notifyText(
+                "AUTH_FAIL|hmac"
+            );
             return;
         }
 
         gAuthenticated = true;
-        notifyText("AUTH_OK|" FW_VERSION);
+
+        notifyText(
+            "AUTH_OK|" FW_VERSION
+        );
+
         return;
     }
 
     if (!gAuthenticated) {
-        notifyText("ERR|not_authenticated");
+        notifyText(
+            "ERR|not_authenticated"
+        );
         return;
     }
 
     if (message == "PING") {
-        notifyText("PONG|" + String(millis()));
+        notifyText(
+            "PONG|" +
+            String(millis())
+        );
         return;
     }
 
     if (message == "STATUS") {
-        notifyText(telemetryText());
+        notifyText(
+            telemetryText()
+        );
         return;
     }
 
@@ -1018,20 +1857,33 @@ static void processControl(const String& message) {
         return;
     }
 
-    if (message == "FAST_OTA_BEGIN") {
+    if (
+        message ==
+        "FAST_OTA_BEGIN"
+    ) {
         startFastOtaSession();
         return;
     }
 
-    if (message == "FAST_OTA_CANCEL") {
+    if (
+        message ==
+        "FAST_OTA_CANCEL"
+    ) {
         if (gFastOtaActive) {
             stopFastOtaSession();
         }
-        notifyText("FAST_OTA_STOPPED");
+
+        notifyText(
+            "FAST_OTA_STOPPED"
+        );
         return;
     }
 
-    if (message.startsWith("OTA_BEGIN|")) {
+    if (
+        message.startsWith(
+            "OTA_BEGIN|"
+        )
+    ) {
         beginOta(message);
         return;
     }
@@ -1042,21 +1894,60 @@ static void processControl(const String& message) {
     }
 
     if (message == "OTA_ABORT") {
-        abortOta("cancelled_by_app");
+        abortOta(
+            "cancelled_by_app"
+        );
         return;
     }
 
-    notifyText("ERR|unknown_command");
+    notifyText(
+        "ERR|unknown_command"
+    );
 }
 
-class ControlCallbacks : public NimBLECharacteristicCallbacks {
+static bool requireEncryptedLink(
+    NimBLEConnInfo& connInfo
+) {
+    if (connInfo.isEncrypted()) {
+        gLinkEncrypted = true;
+        return true;
+    }
+
+    Serial.println(
+        "Rejected GATT operation: link is not encrypted."
+    );
+
+    notifyText(
+        "ERR|link_not_encrypted"
+    );
+
+    if (gServer != nullptr) {
+        gServer->disconnect(
+            connInfo
+        );
+    }
+
+    return false;
+}
+
+class ControlCallbacks :
+    public NimBLECharacteristicCallbacks {
     void onWrite(
         NimBLECharacteristic* characteristic,
         NimBLEConnInfo& connInfo
     ) override {
-        std::string raw = characteristic->getValue();
-        String text;
+        if (
+            !requireEncryptedLink(
+                connInfo
+            )
+        ) {
+            return;
+        }
 
+        std::string raw =
+            characteristic->getValue();
+
+        String text;
         text.reserve(raw.size());
 
         for (char c : raw) {
@@ -1067,21 +1958,34 @@ class ControlCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
-class OtaCallbacks : public NimBLECharacteristicCallbacks {
+class OtaCallbacks :
+    public NimBLECharacteristicCallbacks {
     void onWrite(
         NimBLECharacteristic* characteristic,
         NimBLEConnInfo& connInfo
     ) override {
-        std::string raw = characteristic->getValue();
+        if (
+            !requireEncryptedLink(
+                connInfo
+            )
+        ) {
+            return;
+        }
+
+        std::string raw =
+            characteristic->getValue();
 
         receiveOtaData(
-            reinterpret_cast<const uint8_t*>(raw.data()),
+            reinterpret_cast<const uint8_t*>(
+                raw.data()
+            ),
             raw.size()
         );
     }
 };
 
-class ServerCallbacks : public NimBLEServerCallbacks {
+class ServerCallbacks :
+    public NimBLEServerCallbacks {
     uint32_t onPassKeyDisplay() override {
         return BLE_PASSKEY;
     }
@@ -1092,6 +1996,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     ) override {
         gConnected = true;
         gAuthenticated = false;
+        gLinkEncrypted =
+            connInfo.isEncrypted();
 
         server->updateConnParams(
             connInfo.getConnHandle(),
@@ -1100,30 +2006,30 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             0,
             400
         );
+
+        Serial.println(
+            "BLE client connected."
+        );
     }
 
     void onAuthenticationComplete(
         NimBLEConnInfo& connInfo
     ) override {
+        gLinkEncrypted =
+            connInfo.isEncrypted();
+
         Serial.printf(
-            "BLE security complete: encrypted=%d authenticated=%d\n",
+            "BLE security complete: encrypted=%d authenticated=%d bonded=%d\n",
             connInfo.isEncrypted() ? 1 : 0,
-            connInfo.isAuthenticated() ? 1 : 0
+            connInfo.isAuthenticated() ? 1 : 0,
+            connInfo.isBonded() ? 1 : 0
         );
 
-        // Android/NimBLE combinations can report the authenticated flag as
-        // false even after a valid bonded encrypted link. Requiring that flag
-        // here caused reliable Samsung reconnects to be dropped immediately.
-        // Transport security is therefore enforced with encryption, while
-        // command authenticity remains enforced independently by the
-        // PrivateLink HMAC challenge-response.
         if (!connInfo.isEncrypted()) {
-            Serial.println(
-                "BLE encryption failed; disconnecting peer."
-            );
-
             if (gServer != nullptr) {
-                gServer->disconnect(connInfo);
+                gServer->disconnect(
+                    connInfo
+                );
             }
         }
     }
@@ -1134,27 +2040,52 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         int reason
     ) override {
         gConnected = false;
+        gLinkEncrypted = false;
         gAuthenticated = false;
 
         if (gOtaActive) {
             Update.abort();
             freeDigests();
+
             gOtaActive = false;
             gOtaSize = 0;
             gOtaReceived = 0;
         }
 
-        delay(40);
+        gNextResearchAt =
+            millis() +
+            RESEARCH_IDLE_DELAY_MS;
 
-        if (gAdvertising != nullptr) {
+        delay(30);
+
+        if (
+            gAdvertising != nullptr &&
+            !gFastOtaActive
+        ) {
             gAdvertising->start();
         }
+
+        Serial.printf(
+            "BLE client disconnected: reason=%d\n",
+            reason
+        );
     }
 };
 
 void setup() {
     Serial.begin(115200);
     delay(250);
+
+    wifiOff();
+
+    gProvisioned =
+        loadProvisionedKey();
+
+    if (!gProvisioned) {
+        gProvisionWindowDeadline =
+            millis() +
+            PROVISION_WINDOW_MS;
+    }
 
     NimBLEDevice::init("");
 
@@ -1174,27 +2105,36 @@ void setup() {
 
     NimBLEDevice::setMTU(247);
 
-    gServer = NimBLEDevice::createServer();
-    gServer->setCallbacks(new ServerCallbacks());
-    gServer->advertiseOnDisconnect(false);
+    gServer =
+        NimBLEDevice::createServer();
+
+    gServer->setCallbacks(
+        new ServerCallbacks()
+    );
+
+    gServer->advertiseOnDisconnect(
+        false
+    );
 
     NimBLEService* service =
-        gServer->createService(SERVICE_UUID);
+        gServer->createService(
+            SERVICE_UUID
+        );
 
     NimBLECharacteristic* control =
         service->createCharacteristic(
             CONTROL_UUID,
-            NIMBLE_PROPERTY::WRITE |
-            NIMBLE_PROPERTY::WRITE_ENC,
+            NIMBLE_PROPERTY::WRITE,
             512
         );
 
-    control->setCallbacks(new ControlCallbacks());
+    control->setCallbacks(
+        new ControlCallbacks()
+    );
 
     gResponse =
         service->createCharacteristic(
             RESPONSE_UUID,
-            NIMBLE_PROPERTY::READ_ENC |
             NIMBLE_PROPERTY::NOTIFY,
             512
         );
@@ -1202,56 +2142,108 @@ void setup() {
     NimBLECharacteristic* ota =
         service->createCharacteristic(
             OTA_UUID,
-            NIMBLE_PROPERTY::WRITE |
-            NIMBLE_PROPERTY::WRITE_ENC,
+            NIMBLE_PROPERTY::WRITE,
             512
         );
 
-    ota->setCallbacks(new OtaCallbacks());
+    ota->setCallbacks(
+        new OtaCallbacks()
+    );
 
     gServer->start();
 
-    gAdvertising = NimBLEDevice::getAdvertising();
-    gAdvertising->addServiceUUID(SERVICE_UUID);
-    gAdvertising->setMinInterval(1280);
-    gAdvertising->setMaxInterval(1920);
+    gAdvertising =
+        NimBLEDevice::getAdvertising();
+
+    gAdvertising->addServiceUUID(
+        SERVICE_UUID
+    );
+
+    gAdvertising->setMinInterval(
+        1280
+    );
+
+    gAdvertising->setMaxInterval(
+        1920
+    );
+
     gAdvertising->start();
 
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, true);
-    delay(120);
+    gNextResearchAt =
+        millis() +
+        RESEARCH_IDLE_DELAY_MS;
 
     Serial.println();
-    Serial.println("LENDAS S3 PrivateLink Research");
-    Serial.println("Firmware: " FW_VERSION);
-    Serial.println("Target: ESP32-S3 N16R8");
-    Serial.println("Advertising iniciado.");
-    Serial.println("Research mode: passive Wi-Fi + passive BLE survey.");
-    Serial.println("Fast OTA: secure temporary Wi-Fi transport enabled.");
+    Serial.println(
+        "LENDAS S3 PrivateLink Stable"
+    );
+
+    Serial.println(
+        "Firmware: " FW_VERSION
+    );
+
+    Serial.println(
+        "Target: ESP32-S3 N16R8"
+    );
+
+    Serial.println(
+        "Advertising iniciado."
+    );
+
+    Serial.printf(
+        "Provisioned: %s\n",
+        gProvisioned
+            ? "yes"
+            : "no"
+    );
+
+    Serial.println(
+        "Normal mode: Wi-Fi OFF."
+    );
+
+    Serial.println(
+        "Research runs only while BLE is disconnected."
+    );
+
+    Serial.println(
+        "Fast OTA enables a temporary visible WPA2 AP only for the update session."
+    );
 }
 
 void loop() {
     serviceFastOta();
 
+    uint32_t now = millis();
+
     if (
+        !gConnected &&
         !gOtaActive &&
         !gFastOtaActive &&
-        (
-            gResearch.lastSurveyMs == 0 ||
-            millis() - gLastResearchSurvey >= RESEARCH_SURVEY_INTERVAL_MS
-        )
+        static_cast<int32_t>(
+            now -
+            gNextResearchAt
+        ) >= 0
     ) {
         runResearchSurvey();
+
+        gNextResearchAt =
+            millis() +
+            RESEARCH_INTERVAL_MS;
     }
 
     if (
         gConnected &&
         gAuthenticated &&
         !gOtaActive &&
-        millis() - gLastTelemetry >= 5000
+        now -
+            gLastTelemetry >=
+            5000
     ) {
-        gLastTelemetry = millis();
-        notifyText(telemetryText());
+        gLastTelemetry = now;
+
+        notifyText(
+            telemetryText()
+        );
     }
 
     delay(20);
