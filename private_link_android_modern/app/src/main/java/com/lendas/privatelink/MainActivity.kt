@@ -157,7 +157,7 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    val permissionLauncher =
+    val blePermissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { grants ->
@@ -181,8 +181,19 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
             }
         }
 
+    val wifiPermissionLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { _ ->
+            // Fast OTA will use Wi-Fi when permission is available.
+            // If it is denied/unavailable, the ViewModel preserves BLE fallback.
+            firmwarePicker.launch(
+                arrayOf("application/octet-stream", "*/*")
+            )
+        }
+
     val requestScan: () -> Unit = {
-        val permissions = requiredPermissions()
+        val permissions = requiredBlePermissions()
         val missing = permissions.filter {
             ContextCompat.checkSelfPermission(context, it) !=
                 PackageManager.PERMISSION_GRANTED
@@ -191,7 +202,23 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
         if (missing.isEmpty()) {
             vm.startScan()
         } else {
-            permissionLauncher.launch(missing.toTypedArray())
+            blePermissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    val requestFirmware: () -> Unit = {
+        val permissions = requiredFastOtaPermissions()
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(context, it) !=
+                PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missing.isEmpty()) {
+            firmwarePicker.launch(
+                arrayOf("application/octet-stream", "*/*")
+            )
+        } else {
+            wifiPermissionLauncher.launch(missing.toTypedArray())
         }
     }
 
@@ -210,9 +237,7 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
                 onConnect = vm::connect,
                 onDisconnect = vm::disconnect,
                 onCommand = vm::sendCommand,
-                onPickFirmware = {
-                    firmwarePicker.launch(arrayOf("application/octet-stream", "*/*"))
-                },
+                onPickFirmware = requestFirmware,
                 onAbortOta = vm::abortOta,
                 onClearKey = vm::clearPrivateKey
             )
@@ -220,14 +245,8 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
     }
 }
 
-private fun requiredPermissions(): List<String> =
+private fun requiredBlePermissions(): List<String> =
     when {
-        Build.VERSION.SDK_INT >= 33 -> listOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.NEARBY_WIFI_DEVICES
-        )
-
         Build.VERSION.SDK_INT >= 31 -> listOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT
@@ -236,6 +255,19 @@ private fun requiredPermissions(): List<String> =
         else -> listOf(
             Manifest.permission.ACCESS_FINE_LOCATION
         )
+    }
+
+private fun requiredFastOtaPermissions(): List<String> =
+    when {
+        Build.VERSION.SDK_INT >= 33 -> listOf(
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        )
+
+        Build.VERSION.SDK_INT >= 29 -> listOf(
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+
+        else -> emptyList()
     }
 
 @Composable
