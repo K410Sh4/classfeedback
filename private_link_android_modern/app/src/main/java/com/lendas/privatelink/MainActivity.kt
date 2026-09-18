@@ -216,12 +216,6 @@ private fun PrivateLinkRoot(vm: PrivateLinkViewModel) {
         }
     }
 
-    val requestFirmware: () -> Unit = {
-        if (state.selectedNode == null) {
-            return@let
-        }
-    }
-
     val launchFirmwarePicker: () -> Unit = {
         val missing =
             requiredFastOtaPermissions().filter {
