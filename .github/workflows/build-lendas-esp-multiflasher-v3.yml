@@ -1,4 +1,4 @@
-name: Build LENDAS ESP MultiFlasher v3
+name: Build ESPhub MultiFlasher v4
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout flasher branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-private-link-multiflasher-v3
+          ref: chatgpt-esphub-multiflasher-v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,26 +36,26 @@ jobs:
 
       - name: Build one-file Windows executable
         shell: pwsh
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name LENDAS_ESP_MultiFlasher_v3_0 --collect-all esptool --collect-all serial private_link_multiflasher_v3/main.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name ESPhub_MultiFlasher_v4_0 --collect-all esptool --collect-all serial private_link_multiflasher_v3/main.py
 
       - name: Smoke test embedded esptool helper
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath '.\dist\LENDAS_ESP_MultiFlasher_v3_0.exe' -ArgumentList '--esptool','version' -Wait -PassThru -NoNewWindow
+          $p = Start-Process -FilePath '.\dist\ESPhub_MultiFlasher_v4_0.exe' -ArgumentList '--esptool','version' -Wait -PassThru -NoNewWindow
           if ($p.ExitCode -ne 0) { throw "Embedded esptool smoke test failed with exit code $($p.ExitCode)" }
 
       - name: Package final artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item '.\dist\LENDAS_ESP_MultiFlasher_v3_0.exe' '.\out\LENDAS_ESP_MultiFlasher_v3_0.exe'
-          $hash = (Get-FileHash '.\out\LENDAS_ESP_MultiFlasher_v3_0.exe' -Algorithm SHA256).Hash.ToLower()
-          "$hash  LENDAS_ESP_MultiFlasher_v3_0.exe" | Out-File -Encoding ascii '.\out\LENDAS_ESP_MultiFlasher_v3_0.sha256'
+          Copy-Item '.\dist\ESPhub_MultiFlasher_v4_0.exe' '.\out\ESPhub_MultiFlasher_v4_0.exe'
+          $hash = (Get-FileHash '.\out\ESPhub_MultiFlasher_v4_0.exe' -Algorithm SHA256).Hash.ToLower()
+          "$hash  ESPhub_MultiFlasher_v4_0.exe" | Out-File -Encoding ascii '.\out\ESPhub_MultiFlasher_v4_0.sha256'
 
       - name: Upload MultiFlasher
         uses: actions/upload-artifact@v4
         with:
-          name: LENDAS_ESP_MultiFlasher_v3_0
+          name: ESPhub_MultiFlasher_v4_0
           path: out/
           if-no-files-found: error
           retention-days: 7
