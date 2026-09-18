@@ -1,4 +1,4 @@
-name: Build LENDAS PrivateLink Multi-Node Firmware
+name: Build ESPhub LabTest V1 Firmware Pack
 
 on:
   workflow_dispatch:
@@ -11,13 +11,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout multi-node firmware branch
+      - name: Checkout ESPhub LabTest firmware branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-private-link-multinode-fw-1-4
+          ref: chatgpt-esphub-labtest-fw-v1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,44 +35,59 @@ jobs:
         working-directory: private_link_firmware
         run: pio run -e nanoesp32c6_v1711
 
-      - name: Collect and merge binaries
+      - name: Build ESP32 DevKit V1
+        working-directory: private_link_firmware
+        run: pio run -e esp32dev_v1
+
+      - name: Collect factory and OTA binaries
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p out/s3 out/c6
+          mkdir -p out/s3 out/c6 out/esp32
 
           S3="private_link_firmware/.pio/build/esp32s3_n16r8"
           C6="private_link_firmware/.pio/build/nanoesp32c6_v1711"
+          E32="private_link_firmware/.pio/build/esp32dev_v1"
 
-          cp "$S3/firmware.bin" out/s3/LENDAS_PrivateLink_S3_v1_4_0_OTA.bin
-          cp "$C6/firmware.bin" out/c6/LENDAS_PrivateLink_C6_v1_0_0_OTA.bin
+          cp "$S3/firmware.bin" out/s3/ESPhub_S3_v1_5_0_OTA.bin
+          cp "$C6/firmware.bin" out/c6/ESPhub_C6_v1_1_0_OTA.bin
+          cp "$E32/firmware.bin" out/esp32/ESPhub_ESP32_v1_0_0_OTA.bin
+
+          BOOT_APP0="$(find ~/.platformio/packages -type f -name boot_app0.bin | head -n 1)"
 
           if [ -f "$S3/firmware.factory.bin" ]; then
-            cp "$S3/firmware.factory.bin" out/s3/LENDAS_PrivateLink_S3_v1_4_0_FULL.bin
+            cp "$S3/firmware.factory.bin" out/s3/ESPhub_S3_v1_5_0_FULL.bin
           else
-            BOOT_APP0="$(find ~/.platformio/packages -type f -name boot_app0.bin | head -n 1)"
-            python -m esptool --chip esp32s3 merge-bin               -o out/s3/LENDAS_PrivateLink_S3_v1_4_0_FULL.bin               0x0 "$S3/bootloader.bin"               0x8000 "$S3/partitions.bin"               0xE000 "$BOOT_APP0"               0x10000 "$S3/firmware.bin"
+            python -m esptool --chip esp32s3 merge-bin               -o out/s3/ESPhub_S3_v1_5_0_FULL.bin               0x0 "$S3/bootloader.bin"               0x8000 "$S3/partitions.bin"               0xE000 "$BOOT_APP0"               0x10000 "$S3/firmware.bin"
           fi
 
           if [ -f "$C6/firmware.factory.bin" ]; then
-            cp "$C6/firmware.factory.bin" out/c6/LENDAS_PrivateLink_C6_v1_0_0_FULL.bin
+            cp "$C6/firmware.factory.bin" out/c6/ESPhub_C6_v1_1_0_FULL.bin
           else
-            BOOT_APP0="$(find ~/.platformio/packages -type f -name boot_app0.bin | head -n 1)"
-            python -m esptool --chip esp32c6 merge-bin               -o out/c6/LENDAS_PrivateLink_C6_v1_0_0_FULL.bin               0x0 "$C6/bootloader.bin"               0x8000 "$C6/partitions.bin"               0xE000 "$BOOT_APP0"               0x10000 "$C6/firmware.bin"
+            python -m esptool --chip esp32c6 merge-bin               -o out/c6/ESPhub_C6_v1_1_0_FULL.bin               0x0 "$C6/bootloader.bin"               0x8000 "$C6/partitions.bin"               0xE000 "$BOOT_APP0"               0x10000 "$C6/firmware.bin"
+          fi
+
+          if [ -f "$E32/firmware.factory.bin" ]; then
+            cp "$E32/firmware.factory.bin" out/esp32/ESPhub_ESP32_v1_0_0_FULL.bin
+          else
+            python -m esptool --chip esp32 merge-bin               -o out/esp32/ESPhub_ESP32_v1_0_0_FULL.bin               0x1000 "$E32/bootloader.bin"               0x8000 "$E32/partitions.bin"               0xE000 "$BOOT_APP0"               0x10000 "$E32/firmware.bin"
           fi
 
           cp "$S3/bootloader.bin" out/s3/bootloader.bin
           cp "$S3/partitions.bin" out/s3/partitions.bin
           cp "$C6/bootloader.bin" out/c6/bootloader.bin
           cp "$C6/partitions.bin" out/c6/partitions.bin
+          cp "$E32/bootloader.bin" out/esp32/bootloader.bin
+          cp "$E32/partitions.bin" out/esp32/partitions.bin
 
           sha256sum out/s3/*.bin > out/s3/SHA256SUMS.txt
           sha256sum out/c6/*.bin > out/c6/SHA256SUMS.txt
+          sha256sum out/esp32/*.bin > out/esp32/SHA256SUMS.txt
 
       - name: Upload S3 firmware
         uses: actions/upload-artifact@v4
         with:
-          name: LENDAS_PrivateLink_S3_v1_4_0
+          name: ESPhub_S3_v1_5_0
           path: out/s3/
           if-no-files-found: error
           retention-days: 7
@@ -80,7 +95,15 @@ jobs:
       - name: Upload C6 firmware
         uses: actions/upload-artifact@v4
         with:
-          name: LENDAS_PrivateLink_C6_v1_0_0
+          name: ESPhub_C6_v1_1_0
           path: out/c6/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload ESP32 DevKit firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESPhub_ESP32_v1_0_0
+          path: out/esp32/
           if-no-files-found: error
           retention-days: 7
