@@ -752,7 +752,7 @@ void setup() {
     gAdvertising->start();
 
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect(true, true);
+    WiFi.disconnect(false, true);
     delay(120);
 
     Serial.println();
