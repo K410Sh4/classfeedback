@@ -1,0 +1,90 @@
+name: Build LENDAS PrivateLink Multi-Node Firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-lendas-private-link-multinode.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout multi-node firmware branch
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-private-link-multinode-fw-1-4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ESP32-S3 N16R8
+        working-directory: private_link_firmware
+        run: pio run -e esp32s3_n16r8
+
+      - name: Build nanoESP32-C6 V1711
+        working-directory: private_link_firmware
+        run: pio run -e nanoesp32c6_v1711
+
+      - name: Collect and merge binaries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out/s3 out/c6
+
+          S3="private_link_firmware/.pio/build/esp32s3_n16r8"
+          C6="private_link_firmware/.pio/build/nanoesp32c6_v1711"
+
+          cp "$S3/firmware.bin" out/s3/LENDAS_PrivateLink_S3_v1_4_0_OTA.bin
+          cp "$S3/bootloader.bin" out/s3/bootloader.bin
+          cp "$S3/partitions.bin" out/s3/partitions.bin
+
+          cp "$C6/firmware.bin" out/c6/LENDAS_PrivateLink_C6_v1_0_0_OTA.bin
+          cp "$C6/bootloader.bin" out/c6/bootloader.bin
+          cp "$C6/partitions.bin" out/c6/partitions.bin
+
+          BOOT_APP0="$(find ~/.platformio/packages -type f -name boot_app0.bin | head -n 1)"
+          test -n "$BOOT_APP0"
+          cp "$BOOT_APP0" out/s3/boot_app0.bin
+          cp "$BOOT_APP0" out/c6/boot_app0.bin
+
+          ESPTOOL="$(find ~/.platformio/packages -type f -name esptool.py | head -n 1)"
+          if [ -n "$ESPTOOL" ]; then
+            python "$ESPTOOL" --chip esp32s3 merge_bin               -o out/s3/LENDAS_PrivateLink_S3_v1_4_0_FULL.bin               0x0 out/s3/bootloader.bin               0x8000 out/s3/partitions.bin               0xE000 out/s3/boot_app0.bin               0x10000 out/s3/LENDAS_PrivateLink_S3_v1_4_0_OTA.bin
+
+            python "$ESPTOOL" --chip esp32c6 merge_bin               -o out/c6/LENDAS_PrivateLink_C6_v1_0_0_FULL.bin               0x0 out/c6/bootloader.bin               0x8000 out/c6/partitions.bin               0xE000 out/c6/boot_app0.bin               0x10000 out/c6/LENDAS_PrivateLink_C6_v1_0_0_OTA.bin
+          else
+            ESPTOOL_BIN="$(find ~/.platformio/packages -type f -name esptool | head -n 1)"
+            test -n "$ESPTOOL_BIN"
+            "$ESPTOOL_BIN" --chip esp32s3 merge-bin               -o out/s3/LENDAS_PrivateLink_S3_v1_4_0_FULL.bin               0x0 out/s3/bootloader.bin               0x8000 out/s3/partitions.bin               0xE000 out/s3/boot_app0.bin               0x10000 out/s3/LENDAS_PrivateLink_S3_v1_4_0_OTA.bin
+
+            "$ESPTOOL_BIN" --chip esp32c6 merge-bin               -o out/c6/LENDAS_PrivateLink_C6_v1_0_0_FULL.bin               0x0 out/c6/bootloader.bin               0x8000 out/c6/partitions.bin               0xE000 out/c6/boot_app0.bin               0x10000 out/c6/LENDAS_PrivateLink_C6_v1_0_0_OTA.bin
+          fi
+
+          sha256sum out/s3/*.bin > out/s3/SHA256SUMS.txt
+          sha256sum out/c6/*.bin > out/c6/SHA256SUMS.txt
+
+      - name: Upload S3 firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: LENDAS_PrivateLink_S3_v1_4_0
+          path: out/s3/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload C6 firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: LENDAS_PrivateLink_C6_v1_0_0
+          path: out/c6/
+          if-no-files-found: error
+          retention-days: 7
