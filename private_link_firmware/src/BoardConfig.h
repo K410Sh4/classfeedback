@@ -18,7 +18,7 @@
 #define PL_BOARD "nanoESP32-C6-V1.0"
 #define PL_ROLE "RADIO_NODE"
 #define PL_CAPS "BLE,WIFI,RESEARCH,FAST_OTA,IEEE802154_READY"
-#define PL_MAX_APP_SIZE 0x180000
+#define PL_MAX_APP_SIZE 0x1B0000
 
 #else
 #error "Unsupported target for PrivateLink Multi-Node firmware"
