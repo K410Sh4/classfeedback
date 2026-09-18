@@ -6,8 +6,8 @@
 #include <esp_system.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include "BoardConfig.h"
 
-#define FW_VERSION "1.3.0"
 #define BLE_PASSKEY 496110
 
 static const char* SERVICE_UUID =
@@ -29,6 +29,7 @@ static NimBLEAdvertising* gAdvertising = nullptr;
 static bool gConnected = false;
 static bool gLinkEncrypted = false;
 static bool gAuthenticated = false;
+static String gNodeId;
 
 static uint8_t gAppAuthKey[32] = {0};
 static bool gProvisioned = false;
@@ -210,6 +211,37 @@ static String randomAlphaNumeric(size_t len) {
     }
 
     return out;
+}
+
+static String nodeIdFromEfuse() {
+    uint64_t mac = ESP.getEfuseMac();
+    char buffer[20];
+
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "%02X%02X%02X%02X%02X%02X",
+        static_cast<unsigned>((mac >> 40) & 0xFF),
+        static_cast<unsigned>((mac >> 32) & 0xFF),
+        static_cast<unsigned>((mac >> 24) & 0xFF),
+        static_cast<unsigned>((mac >> 16) & 0xFF),
+        static_cast<unsigned>((mac >> 8) & 0xFF),
+        static_cast<unsigned>(mac & 0xFF)
+    );
+
+    return String(buffer);
+}
+
+static String deviceInfoText() {
+    String text = "INFO";
+    text += "|node_id=" + gNodeId;
+    text += "|model=" PL_MODEL;
+    text += "|board=" PL_BOARD;
+    text += "|role=" PL_ROLE;
+    text += "|fw=" PL_FW_VERSION;
+    text += "|flash_bytes=" + String(ESP.getFlashChipSize());
+    text += "|caps=" PL_CAPS;
+    return text;
 }
 
 static void notifyText(const String& text) {
@@ -471,7 +503,7 @@ static void beginOta(
 
     if (
         imageSize == 0 ||
-        imageSize > 0x600000
+        imageSize > PL_MAX_APP_SIZE
     ) {
         notifyText(
             "OTA_ERROR|invalid_size"
@@ -924,7 +956,12 @@ static void runResearchSurvey() {
 
 static String telemetryText() {
     String text =
-        "TEL|fw=" FW_VERSION;
+        "TEL|fw=" PL_FW_VERSION;
+
+    text += "|node_id=" + gNodeId;
+    text += "|model=" PL_MODEL;
+    text += "|role=" PL_ROLE;
+    text += "|flash_bytes=" + String(ESP.getFlashChipSize());
 
     text +=
         "|uptime_ms=" +
@@ -1254,7 +1291,7 @@ static bool parseFastOtaHeader(
 
     if (
         imageSize == 0 ||
-        imageSize > 0x600000
+        imageSize > PL_MAX_APP_SIZE
     ) {
         return false;
     }
@@ -1561,7 +1598,7 @@ static void serviceFastOta() {
     }
 
     client.print(
-        "OK|" FW_VERSION "\n"
+        "OK|" PL_FW_VERSION "\n"
     );
 
     client.flush();
@@ -1686,7 +1723,7 @@ static bool handleProvision(
     );
 
     notifyText(
-        "PROVISION_OK|" FW_VERSION
+        "PROVISION_OK|" PL_FW_VERSION
     );
 
     Serial.println(
@@ -1709,7 +1746,7 @@ static void processControl(
             );
 
             notifyText(
-                "PROVISION_REQUIRED|" FW_VERSION "|" +
+                "PROVISION_REQUIRED|" PL_FW_VERSION "|" +
                 bytesToHex(
                     gProvisionNonce,
                     sizeof(gProvisionNonce)
@@ -1822,7 +1859,7 @@ static void processControl(
         gAuthenticated = true;
 
         notifyText(
-            "AUTH_OK|" FW_VERSION
+            "AUTH_OK|" PL_FW_VERSION
         );
 
         return;
@@ -1839,6 +1876,13 @@ static void processControl(
         notifyText(
             "PONG|" +
             String(millis())
+        );
+        return;
+    }
+
+    if (message == "INFO") {
+        notifyText(
+            deviceInfoText()
         );
         return;
     }
@@ -2078,6 +2122,9 @@ void setup() {
 
     wifiOff();
 
+    gNodeId =
+        nodeIdFromEfuse();
+
     gProvisioned =
         loadProvisionedKey();
 
@@ -2175,15 +2222,35 @@ void setup() {
 
     Serial.println();
     Serial.println(
-        "LENDAS S3 PrivateLink Stable"
+        "LENDAS PrivateLink Multi-Node"
     );
 
     Serial.println(
-        "Firmware: " FW_VERSION
+        "Firmware: " PL_FW_VERSION
     );
 
     Serial.println(
-        "Target: ESP32-S3 N16R8"
+        "Model: " PL_MODEL
+    );
+
+    Serial.println(
+        "Board: " PL_BOARD
+    );
+
+    Serial.println(
+        "Role: " PL_ROLE
+    );
+
+    Serial.printf(
+        "Node ID: %s\n",
+        gNodeId.c_str()
+    );
+
+    Serial.printf(
+        "Flash detected: %u bytes\n",
+        static_cast<unsigned>(
+            ESP.getFlashChipSize()
+        )
     );
 
     Serial.println(
