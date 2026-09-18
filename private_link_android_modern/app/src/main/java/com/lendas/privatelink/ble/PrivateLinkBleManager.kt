@@ -73,6 +73,9 @@ class PrivateLinkBleManager(
     private var authenticated = false
     private var privateKey: ByteArray? = null
     private var authGeneration = 0
+    private var awaitingBond = false
+    private var bondGeneration = 0
+    private var servicesDiscoveryStarted = false
 
     private data class WriteTask(
         val characteristic: BluetoothGattCharacteristic,
@@ -187,26 +190,19 @@ class PrivateLinkBleManager(
         pendingBondDevice = device.device
         listener.onConnectedAddress(device.address)
 
-        if (device.device.bondState != BluetoothDevice.BOND_BONDED) {
-            listener.onLinkState(
-                LinkState.Pairing,
-                "Pareando • código ${Protocol.PAIRING_PASSKEY}"
-            )
-            log("Iniciando pareamento com ${device.address}.")
-            val started = runCatching { device.device.createBond() }.getOrDefault(false)
-            if (!started) {
-                log("Bonding não iniciou automaticamente; tentando conexão GATT.")
-                connectGatt(device.device)
-            }
-        } else {
-            connectGatt(device.device)
-        }
+        // Android BLE is more reliable when bonding starts after a real GATT
+        // connection exists. Starting createBond() from scan-only state can
+        // remain in BOND_BONDING indefinitely on some Samsung/Android builds.
+        connectGatt(device.device)
     }
 
     fun disconnect() {
         connected = false
         authenticated = false
         authGeneration++
+        awaitingBond = false
+        bondGeneration++
+        servicesDiscoveryStarted = false
         otaActive = false
         waitingOtaReady = false
         awaitingFastOta = false
@@ -326,6 +322,7 @@ class PrivateLinkBleManager(
 
         runCatching { gatt?.close() }
         gatt = null
+        servicesDiscoveryStarted = false
 
         listener.onLinkState(LinkState.Connecting, "Conectando ao ESP32-S3...")
         log("Conectando em ${device.address}")
@@ -341,6 +338,128 @@ class PrivateLinkBleManager(
             @Suppress("DEPRECATION")
             device.connectGatt(context, false, gattCallback)
         }
+    }
+
+    private fun beginBondingOnConnectedGatt(
+        bluetoothGatt: BluetoothGatt
+    ) {
+        if (!hasBlePermissions()) return
+
+        val device = bluetoothGatt.device
+
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            awaitingBond = false
+            continueGattSetup(bluetoothGatt)
+            return
+        }
+
+        awaitingBond = true
+        val generation = ++bondGeneration
+
+        listener.onLinkState(
+            LinkState.Pairing,
+            "Pareando • confirme o código ${Protocol.PAIRING_PASSKEY}"
+        )
+
+        log(
+            "BLE conectado; iniciando pareamento seguro com ${device.address}."
+        )
+
+        handler.postDelayed({
+            if (
+                generation != bondGeneration ||
+                !connected ||
+                gatt !== bluetoothGatt
+            ) {
+                return@postDelayed
+            }
+
+            val started = runCatching {
+                when (device.bondState) {
+                    BluetoothDevice.BOND_BONDED -> true
+                    BluetoothDevice.BOND_BONDING -> true
+                    else -> device.createBond()
+                }
+            }.getOrDefault(false)
+
+            if (!started) {
+                awaitingBond = false
+                bondGeneration++
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Android não iniciou o pareamento BLE"
+                )
+                log(
+                    "createBond() foi recusado. Esqueça o dispositivo no Bluetooth e tente novamente."
+                )
+            }
+        }, 250)
+
+        handler.postDelayed({
+            if (
+                generation == bondGeneration &&
+                awaitingBond &&
+                device.bondState != BluetoothDevice.BOND_BONDED
+            ) {
+                awaitingBond = false
+                bondGeneration++
+
+                listener.onLinkState(
+                    LinkState.Error,
+                    "Pareamento expirou • tente novamente"
+                )
+
+                log(
+                    "Timeout de pareamento após 20s. O app não ficará preso indefinidamente."
+                )
+
+                runCatching { bluetoothGatt.disconnect() }
+            }
+        }, 20_000)
+    }
+
+    private fun continueGattSetup(
+        bluetoothGatt: BluetoothGatt
+    ) {
+        if (
+            !connected ||
+            gatt !== bluetoothGatt ||
+            servicesDiscoveryStarted ||
+            !hasBlePermissions()
+        ) {
+            return
+        }
+
+        servicesDiscoveryStarted = true
+
+        listener.onLinkState(
+            LinkState.Connecting,
+            "Pareado • preparando canal seguro..."
+        )
+
+        bluetoothGatt.requestConnectionPriority(
+            BluetoothGatt.CONNECTION_PRIORITY_HIGH
+        )
+
+        bluetoothGatt.requestMtu(247)
+
+        handler.postDelayed({
+            if (
+                connected &&
+                gatt === bluetoothGatt
+            ) {
+                val started = bluetoothGatt.discoverServices()
+
+                if (!started) {
+                    servicesDiscoveryStarted = false
+                    listener.onLinkState(
+                        LinkState.Error,
+                        "Não foi possível descobrir serviços BLE"
+                    )
+                    log("discoverServices() não iniciou.")
+                }
+            }
+        }, 450)
     }
 
     private fun beginAuthentication() {
@@ -695,14 +814,51 @@ class PrivateLinkBleManager(
                     BluetoothDevice.ERROR
                 )
             ) {
+                BluetoothDevice.BOND_BONDING -> {
+                    awaitingBond = true
+                    listener.onLinkState(
+                        LinkState.Pairing,
+                        "Aguardando confirmação do pareamento..."
+                    )
+                    log("Android informou BOND_BONDING.")
+                }
+
                 BluetoothDevice.BOND_BONDED -> {
+                    awaitingBond = false
+                    bondGeneration++
                     log("Pareamento concluído.")
-                    connectGatt(device)
+
+                    val activeGatt = gatt
+
+                    if (
+                        connected &&
+                        activeGatt != null &&
+                        activeGatt.device.address == device.address
+                    ) {
+                        continueGattSetup(activeGatt)
+                    } else {
+                        log(
+                            "Pareamento concluído após desconexão; reconectando GATT."
+                        )
+                        handler.postDelayed(
+                            { connectGatt(device) },
+                            500
+                        )
+                    }
                 }
 
                 BluetoothDevice.BOND_NONE -> {
-                    listener.onLinkState(LinkState.Error, "Pareamento não concluído")
-                    log("Pareamento não concluído.")
+                    if (awaitingBond) {
+                        awaitingBond = false
+                        bondGeneration++
+                        listener.onLinkState(
+                            LinkState.Error,
+                            "Pareamento cancelado ou rejeitado"
+                        )
+                        log(
+                            "Pareamento não concluído. Confirme o diálogo do Android e use o código ${Protocol.PAIRING_PASSKEY}."
+                        )
+                    }
                 }
             }
         }
@@ -716,29 +872,61 @@ class PrivateLinkBleManager(
         ) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 connected = true
+                servicesDiscoveryStarted = false
                 listener.onConnectedAddress(bluetoothGatt.device.address)
-                listener.onLinkState(LinkState.Connecting, "BLE conectado • preparando canal")
+                listener.onLinkState(
+                    LinkState.Connecting,
+                    "BLE conectado • verificando segurança..."
+                )
                 log("BLE conectado.")
 
                 if (hasBlePermissions()) {
-                    bluetoothGatt.requestConnectionPriority(
-                        BluetoothGatt.CONNECTION_PRIORITY_HIGH
-                    )
-                    bluetoothGatt.requestMtu(247)
-
-                    handler.postDelayed({
-                        if (connected && gatt === bluetoothGatt) {
-                            bluetoothGatt.discoverServices()
-                        }
-                    }, 450)
+                    beginBondingOnConnectedGatt(bluetoothGatt)
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connected = false
                 authenticated = false
+                servicesDiscoveryStarted = false
                 otaActive = false
                 listener.onAuthenticated(false)
-                listener.onLinkState(LinkState.Idle, "BLE desconectado")
-                log("BLE desconectado. status=$status")
+
+                val device = bluetoothGatt.device
+
+                if (
+                    awaitingBond &&
+                    device.bondState == BluetoothDevice.BOND_BONDING
+                ) {
+                    listener.onLinkState(
+                        LinkState.Pairing,
+                        "Pareamento em andamento..."
+                    )
+                    log(
+                        "GATT desconectou durante BOND_BONDING; aguardando resultado do sistema."
+                    )
+                } else if (
+                    device.bondState == BluetoothDevice.BOND_BONDED &&
+                    pendingBondDevice?.address == device.address
+                ) {
+                    listener.onLinkState(
+                        LinkState.Connecting,
+                        "Pareado • reconectando..."
+                    )
+                    log(
+                        "BLE desconectou após pareamento; reconexão automática."
+                    )
+
+                    handler.postDelayed({
+                        if (!connected) {
+                            connectGatt(device)
+                        }
+                    }, 700)
+                } else {
+                    listener.onLinkState(
+                        LinkState.Idle,
+                        "BLE desconectado"
+                    )
+                    log("BLE desconectado. status=$status")
+                }
             }
         }
 
