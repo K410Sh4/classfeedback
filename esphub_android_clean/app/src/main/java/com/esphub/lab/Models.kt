@@ -41,6 +41,50 @@ data class LabMetrics(
                 state.equals("STARTING", true)
 }
 
+data class WifiAccessPoint(
+    val ssid: String,
+    val bssid: String,
+    val channel: Int,
+    val rssi: Int,
+    val encryptionCode: Int,
+    val open: Boolean
+) {
+    val securityLabel: String
+        get() =
+            if (open) "Aberta"
+            else "Protegida"
+}
+
+data class MonitorMetrics(
+    val state: String = "IDLE",
+    val channel: Int = 0,
+    val hopping: Boolean = false,
+    val elapsedMs: Long = 0,
+    val fps: Int = 0,
+    val rssiAvg: Int? = null,
+    val frames: Long = 0,
+    val management: Long = 0,
+    val control: Long = 0,
+    val data: Long = 0,
+    val beacon: Long = 0,
+    val probeRequest: Long = 0,
+    val probeResponse: Long = 0,
+    val auth: Long = 0,
+    val assoc: Long = 0,
+    val reassoc: Long = 0,
+    val deauthSeen: Long = 0,
+    val disassocSeen: Long = 0,
+    val eapol: Long = 0,
+    val m1: Long = 0,
+    val m2: Long = 0,
+    val m3: Long = 0,
+    val m4: Long = 0,
+    val reason: String? = null
+) {
+    val active: Boolean
+        get() = state.equals("RUNNING", true)
+}
+
 data class NodeState(
     val address: String,
     val rssi: Int? = null,
@@ -53,6 +97,9 @@ data class NodeState(
     val board: String? = null,
     val role: String? = null,
     val capabilities: Set<String> = emptySet(),
+    val wifiAccessPoints: List<WifiAccessPoint> = emptyList(),
+    val wifiScanState: String = "IDLE",
+    val monitor: MonitorMetrics = MonitorMetrics(),
     val lab: LabMetrics = LabMetrics(),
     val lastError: String? = null
 ) {
