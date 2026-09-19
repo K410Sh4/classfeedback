@@ -121,6 +121,31 @@ class AppViewModel(
         }
     }
 
+    fun selectWifiTarget(
+        accessPoint: WifiAccessPoint
+    ) {
+        _state.update {
+            it.copy(
+                selectedWifiTarget =
+                    accessPoint
+            )
+        }
+
+        addLog(
+            "Alvo Wi-Fi selecionado: " +
+                (
+                    accessPoint.ssid
+                        .ifBlank {
+                            "<SSID oculto>"
+                        }
+                ) +
+                " • " +
+                accessPoint.bssid +
+                " • CH " +
+                accessPoint.channel
+        )
+    }
+
     fun startLab(
         address: String,
         ssid: String,
