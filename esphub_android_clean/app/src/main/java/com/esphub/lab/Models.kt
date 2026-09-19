@@ -132,6 +132,7 @@ data class AppState(
     val discovered: List<DiscoveredNode> = emptyList(),
     val nodes: Map<String, NodeState> = emptyMap(),
     val selectedAddress: String? = null,
+    val selectedWifiTarget: WifiAccessPoint? = null,
     val logs: List<String> = listOf("ESPhub pronto."),
     val lastCrash: String? = null
 ) {
