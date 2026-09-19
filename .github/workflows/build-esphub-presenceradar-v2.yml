@@ -1,0 +1,121 @@
+name: ESPhub PresenceRadar V2 Candidate
+
+on:
+  push:
+    branches:
+      - esphub-presenceradar-v2-candidate
+    paths:
+      - '.github/workflows/build-esphub-presenceradar-v2.yml'
+      - 'esphub-v2/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: esphub-presenceradar-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    name: Build S3 C6 DevKit FULL BIN
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore V1 verified architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat esphub-presenceradar/source.part*.b64 | tr -d '\n' | base64 -d > /tmp/presenceradar.tar.xz
+          echo '8aab3f6275c5f2fb99d008ff83d8cd5c52b9bfc84c20cd02140d74c2631a6466  /tmp/presenceradar.tar.xz' | sha256sum -c -
+          tar -xJf /tmp/presenceradar.tar.xz -C .
+          python esphub-v2/apply_v2.py
+          test -f firmware/partitions_4MB_c6.csv
+          test -f firmware/src/presence_radar.cpp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install toolchains
+        run: python -m pip install --upgrade platformio esptool
+      - name: Compile and merge bootloader, partitions and apps
+        run: python scripts/build_firmware.py
+      - name: Verify output inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist -maxdepth 1 -name '*FULL.bin' -type f | wc -l)" -eq 3
+          (cd dist && sha256sum *.bin > SHA256SUMS_FIRMWARE.txt)
+          ls -lah dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ESPhub-PresenceRadar-V2-3-FULL-BIN
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  android:
+    name: Build PresenceRadar V2 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore and patch V2 sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat esphub-presenceradar/source.part*.b64 | tr -d '\n' | base64 -d > /tmp/presenceradar.tar.xz
+          echo '8aab3f6275c5f2fb99d008ff83d8cd5c52b9bfc84c20cd02140d74c2631a6466  /tmp/presenceradar.tar.xz' | sha256sum -c -
+          tar -xJf /tmp/presenceradar.tar.xz -C .
+          mkdir -p android/app/src/main/java/com/esphub/app/protocol
+          cp esphub-presenceradar/android-protocol/*.kt android/app/src/main/java/com/esphub/app/protocol/
+          test "$(find android/app/src/main/java/com/esphub/app/protocol -name '*.kt' | wc -l)" -eq 3
+          python esphub-v2/apply_v2.py
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Compile APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+      - name: Verify output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s android/app/build/outputs/apk/debug/app-debug.apk
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/ESPhub_PresenceRadar_V2_debug.apk
+          (cd dist && sha256sum *.apk > SHA256SUMS_APK.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ESPhub-PresenceRadar-V2-APK
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  protocol-tests:
+    name: Protocol and fusion tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat esphub-presenceradar/source.part*.b64 | tr -d '\n' | base64 -d > /tmp/presenceradar.tar.xz
+          echo '8aab3f6275c5f2fb99d008ff83d8cd5c52b9bfc84c20cd02140d74c2631a6466  /tmp/presenceradar.tar.xz' | sha256sum -c -
+          tar -xJf /tmp/presenceradar.tar.xz -C .
+          python esphub-v2/apply_v2.py
+      - name: Install test dependencies
+        run: python -m pip install cryptography
+      - name: Protocol vectors
+        run: python tests/protocol_reference_test.py
+      - name: Presence fusion
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
