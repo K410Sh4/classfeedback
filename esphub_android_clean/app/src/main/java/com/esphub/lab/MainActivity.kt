@@ -493,7 +493,7 @@ private fun NodesScreen(
 
             items(
                 items = state.discovered,
-                key = { it.address.uppercase() }
+                key = { "discovered:" + it.address.uppercase() }
             ) { device ->
                 AppCard {
                     Row(
@@ -536,7 +536,7 @@ private fun NodesScreen(
 
             items(
                 items = nodes,
-                key = { it.address.uppercase() }
+                key = { "session:" + it.address.uppercase() }
             ) { node ->
                 NodeCard(
                     node = node,
@@ -883,7 +883,7 @@ private fun LabScreen(
 
             items(
                 items = labNodes,
-                key = { it.address.uppercase() }
+                key = { "lab:" + it.address.uppercase() }
             ) { node ->
                 LabNodeCard(
                     node = node,
