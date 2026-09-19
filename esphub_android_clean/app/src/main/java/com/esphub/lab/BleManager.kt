@@ -251,6 +251,49 @@ class BleManager(
         )
     }
 
+    fun requestWifiScan(
+        address: String
+    ) = onMain {
+        sessions[
+            normalize(address)
+        ]?.requestWifiScan()
+    }
+
+    fun startMonitor(
+        address: String,
+        channel: Int,
+        durationSeconds: Int,
+        bssid: String?
+    ) = onMain {
+        sessions[
+            normalize(address)
+        ]?.startMonitor(
+            channel = channel,
+            durationSeconds = durationSeconds,
+            bssid = bssid
+        )
+    }
+
+    fun stopMonitor(
+        address: String
+    ) = onMain {
+        sessions[
+            normalize(address)
+        ]?.sendText(
+            "MONITOR_STOP"
+        )
+    }
+
+    fun requestMonitorStatus(
+        address: String
+    ) = onMain {
+        sessions[
+            normalize(address)
+        ]?.sendText(
+            "MONITOR_STATUS"
+        )
+    }
+
     fun close() = onMain {
         stopScanInternal()
         sessions.values.forEach {
@@ -544,6 +587,90 @@ class BleManager(
                     ssid +
                     "|" +
                     password
+            )
+        }
+
+        fun requestWifiScan() {
+            if (!state.authenticated) {
+                log(
+                    "Wi-Fi scan exige sessão autenticada."
+                )
+                return
+            }
+
+            if (
+                "WIFI_SCAN_V1" !in
+                state.capabilities
+            ) {
+                log(
+                    "Firmware sem WIFI_SCAN_V1."
+                )
+                return
+            }
+
+            update {
+                it.copy(
+                    wifiAccessPoints =
+                        emptyList(),
+                    wifiScanState =
+                        "SCANNING"
+                )
+            }
+
+            sendText(
+                "WIFI_SCAN"
+            )
+        }
+
+        fun startMonitor(
+            channel: Int,
+            durationSeconds: Int,
+            bssid: String?
+        ) {
+            if (!state.authenticated) {
+                log(
+                    "Monitor exige sessão autenticada."
+                )
+                return
+            }
+
+            if (
+                "MONITOR_V1" !in
+                state.capabilities
+            ) {
+                log(
+                    "Firmware sem MONITOR_V1."
+                )
+                return
+            }
+
+            val target =
+                bssid
+                    ?.trim()
+                    ?.uppercase(Locale.US)
+                    .orEmpty()
+
+            update {
+                it.copy(
+                    monitor =
+                        MonitorMetrics(
+                            state =
+                                "STARTING",
+                            channel =
+                                channel,
+                            hopping =
+                                channel == 0
+                        )
+                )
+            }
+
+            sendText(
+                "MONITOR_START|" +
+                    channel +
+                    "|" +
+                    durationSeconds +
+                    "|" +
+                    target
             )
         }
 
@@ -1099,6 +1226,67 @@ class BleManager(
                     }
 
                     text ==
+                        "WIFI_SCAN_STARTED" ->
+                        update {
+                            it.copy(
+                                wifiAccessPoints =
+                                    emptyList(),
+                                wifiScanState =
+                                    "SCANNING"
+                            )
+                        }
+
+                    text.startsWith(
+                        "WIFI_SCAN_RESULT|"
+                    ) ->
+                        update {
+                            it.copy(
+                                wifiScanState =
+                                    "RESULTS"
+                            )
+                        }
+
+                    text.startsWith(
+                        "WIFI_AP|"
+                    ) ->
+                        handleWifiAccessPoint(
+                            text
+                        )
+
+                    text.startsWith(
+                        "WIFI_SCAN_DONE|"
+                    ) ->
+                        update {
+                            it.copy(
+                                wifiScanState =
+                                    "DONE"
+                            )
+                        }
+
+                    text.startsWith(
+                        "WIFI_SCAN_ERROR|"
+                    ) -> {
+                        val fields =
+                            parseFields(text)
+
+                        update {
+                            it.copy(
+                                wifiScanState =
+                                    "ERROR",
+                                lastError =
+                                    fields["reason"]
+                            )
+                        }
+                    }
+
+                    text.startsWith(
+                        "MONITOR_"
+                    ) ->
+                        handleMonitorMessage(
+                            text
+                        )
+
+                    text ==
                         "LAB_WIFI_OK" ->
                         continueLabAfterWifi()
 
@@ -1409,6 +1597,237 @@ class BleManager(
                     firmware =
                         fields["fw"]
                             ?: it.firmware
+                )
+            }
+        }
+
+        private fun handleWifiAccessPoint(
+            text: String
+        ) {
+            val fields =
+                parseFields(text)
+
+            val bssid =
+                fields["bssid"]
+                    ?.trim()
+                    ?.uppercase(
+                        Locale.US
+                    )
+                    ?: return
+
+            val ssid =
+                fields["ssid64"]
+                    ?.let {
+                        encoded ->
+                        runCatching {
+                            String(
+                                Base64.decode(
+                                    encoded,
+                                    Base64.NO_WRAP
+                                ),
+                                Charsets.UTF_8
+                            )
+                        }.getOrDefault("")
+                    }
+                    ?: ""
+
+            val accessPoint =
+                WifiAccessPoint(
+                    ssid = ssid,
+                    bssid = bssid,
+                    channel =
+                        fields["channel"]
+                            ?.toIntOrNull()
+                            ?: 0,
+                    rssi =
+                        fields["rssi"]
+                            ?.toIntOrNull()
+                            ?: -127,
+                    encryptionCode =
+                        fields["enc"]
+                            ?.toIntOrNull()
+                            ?: -1,
+                    open =
+                        fields["open"] ==
+                            "1"
+                )
+
+            update {
+                current ->
+                val aps =
+                    current
+                        .wifiAccessPoints
+                        .filterNot {
+                            ap ->
+                            ap.bssid
+                                .equals(
+                                    bssid,
+                                    true
+                                )
+                        } +
+                        accessPoint
+
+                current.copy(
+                    wifiAccessPoints =
+                        aps.sortedByDescending {
+                            it.rssi
+                        },
+                    wifiScanState =
+                        "RESULTS"
+                )
+            }
+        }
+
+        private fun handleMonitorMessage(
+            text: String
+        ) {
+            val fields =
+                parseFields(text)
+
+            val monitorState =
+                when {
+                    text.startsWith(
+                        "MONITOR_STARTED|"
+                    ) ->
+                        "RUNNING"
+
+                    text.startsWith(
+                        "MONITOR_TEL|"
+                    ) ->
+                        "RUNNING"
+
+                    text.startsWith(
+                        "MONITOR_DONE|"
+                    ) ->
+                        "DONE"
+
+                    text.startsWith(
+                        "MONITOR_ERROR|"
+                    ) ->
+                        "ERROR"
+
+                    text.startsWith(
+                        "MONITOR_STATUS|"
+                    ) ->
+                        fields["state"]
+                            ?: state.monitor.state
+
+                    else ->
+                        state.monitor.state
+                }
+
+            update {
+                current ->
+                current.copy(
+                    monitor =
+                        current.monitor.copy(
+                            state =
+                                monitorState,
+                            channel =
+                                fields["channel"]
+                                    ?.toIntOrNull()
+                                    ?: current.monitor.channel,
+                            hopping =
+                                fields["hopping"]
+                                    ?.let {
+                                        value ->
+                                        value == "1"
+                                    }
+                                    ?: current.monitor.hopping,
+                            elapsedMs =
+                                fields["elapsed_ms"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.elapsedMs,
+                            fps =
+                                fields["fps"]
+                                    ?.toIntOrNull()
+                                    ?: current.monitor.fps,
+                            rssiAvg =
+                                fields["rssi_avg"]
+                                    ?.toIntOrNull()
+                                    ?: current.monitor.rssiAvg,
+                            frames =
+                                fields["frames"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.frames,
+                            management =
+                                fields["mgmt"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.management,
+                            control =
+                                fields["ctrl"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.control,
+                            data =
+                                fields["data"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.data,
+                            beacon =
+                                fields["beacon"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.beacon,
+                            probeRequest =
+                                fields["probe_req"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.probeRequest,
+                            probeResponse =
+                                fields["probe_resp"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.probeResponse,
+                            auth =
+                                fields["auth"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.auth,
+                            assoc =
+                                fields["assoc"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.assoc,
+                            reassoc =
+                                fields["reassoc"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.reassoc,
+                            deauthSeen =
+                                fields["deauth_seen"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.deauthSeen,
+                            disassocSeen =
+                                fields["disassoc_seen"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.disassocSeen,
+                            eapol =
+                                fields["eapol"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.eapol,
+                            m1 =
+                                fields["m1"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.m1,
+                            m2 =
+                                fields["m2"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.m2,
+                            m3 =
+                                fields["m3"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.m3,
+                            m4 =
+                                fields["m4"]
+                                    ?.toLongOrNull()
+                                    ?: current.monitor.m4,
+                            reason =
+                                fields["reason"]
+                                    ?: current.monitor.reason
+                        ),
+                    lastError =
+                        if (
+                            monitorState ==
+                            "ERROR"
+                        ) {
+                            fields["reason"]
+                                ?: current.lastError
+                        } else {
+                            current.lastError
+                        }
                 )
             }
         }
