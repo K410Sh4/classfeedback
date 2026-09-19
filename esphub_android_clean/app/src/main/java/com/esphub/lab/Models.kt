@@ -82,7 +82,9 @@ data class MonitorMetrics(
     val reason: String? = null
 ) {
     val active: Boolean
-        get() = state.equals("RUNNING", true)
+        get() =
+            state.equals("RUNNING", true) ||
+                state.equals("STARTING", true)
 }
 
 data class NodeState(
