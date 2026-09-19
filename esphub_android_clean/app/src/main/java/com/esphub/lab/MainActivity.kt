@@ -651,6 +651,831 @@ private fun NodeCard(
 }
 
 @Composable
+private fun WirelessScreen(
+    state: AppState,
+    selectNode: (String) -> Unit,
+    requestWifiScan: (String) -> Result<Unit>,
+    selectWifiTarget: (WifiAccessPoint) -> Unit,
+    startMonitor: (String, Int, Int, String?) -> Result<Unit>,
+    stopMonitor: (String) -> Unit,
+    requestMonitorStatus: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val nodes =
+        state.nodes
+            .values
+            .filter {
+                it.authenticated &&
+                    (
+                        "WIFI_SCAN_V1" in it.capabilities ||
+                        "MONITOR_V1" in it.capabilities
+                    )
+            }
+            .sortedBy { it.displayName }
+
+    val selected =
+        state.selectedNode
+            ?.takeIf {
+                it.authenticated &&
+                    (
+                        "WIFI_SCAN_V1" in it.capabilities ||
+                        "MONITOR_V1" in it.capabilities
+                    )
+            }
+            ?: nodes.firstOrNull()
+
+    val target =
+        state.selectedWifiTarget
+
+    var durationText by remember {
+        mutableStateOf("20")
+    }
+
+    var channel by remember(
+        target?.bssid
+    ) {
+        mutableIntStateOf(
+            target?.channel ?: 0
+        )
+    }
+
+    var error by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    LazyColumn(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement =
+            Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            SectionTitle(
+                "Wireless Tools",
+                "Scan Wi-Fi • monitor passivo • EAPOL"
+            )
+        }
+
+        if (nodes.isEmpty()) {
+            item {
+                AppCard {
+                    Text(
+                        "Conecte e autentique um firmware com WIFI_SCAN_V1 / MONITOR_V1."
+                    )
+                }
+            }
+        } else {
+            item {
+                Text(
+                    "Nós disponíveis",
+                    fontWeight =
+                        FontWeight.SemiBold
+                )
+            }
+
+            items(
+                items = nodes,
+                key = {
+                    "wireless-node:" +
+                        it.address.uppercase()
+                }
+            ) { node ->
+                AppCard {
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        verticalAlignment =
+                            Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Rounded.Hub,
+                            contentDescription = null,
+                            tint =
+                                MaterialTheme
+                                    .colorScheme
+                                    .primary
+                        )
+
+                        Spacer(
+                            Modifier.size(10.dp)
+                        )
+
+                        Column(
+                            modifier =
+                                Modifier.weight(1f)
+                        ) {
+                            Text(
+                                node.displayName,
+                                fontWeight =
+                                    FontWeight.Bold
+                            )
+
+                            Text(
+                                node.firmware ?: "",
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onSurfaceVariant
+                            )
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
+                                selectNode(
+                                    node.address
+                                )
+                            }
+                        ) {
+                            Text(
+                                if (
+                                    selected?.address ==
+                                    node.address
+                                ) {
+                                    "Ativo"
+                                } else {
+                                    "Usar"
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (selected != null) {
+                item {
+                    AppCard {
+                        Row(
+                            modifier =
+                                Modifier.fillMaxWidth(),
+                            verticalAlignment =
+                                Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Rounded.Wifi,
+                                contentDescription = null,
+                                tint =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .primary
+                            )
+
+                            Spacer(
+                                Modifier.size(10.dp)
+                            )
+
+                            Column(
+                                modifier =
+                                    Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    "Redes próximas",
+                                    fontWeight =
+                                        FontWeight.Bold
+                                )
+
+                                Text(
+                                    selected.displayName +
+                                        " • " +
+                                        selected.wifiScanState,
+                                    color =
+                                        MaterialTheme
+                                            .colorScheme
+                                            .onSurfaceVariant
+                                )
+                            }
+
+                            Button(
+                                onClick = {
+                                    error =
+                                        requestWifiScan(
+                                            selected.address
+                                        )
+                                            .exceptionOrNull()
+                                            ?.message
+                                },
+                                enabled =
+                                    "WIFI_SCAN_V1" in
+                                        selected.capabilities
+                            ) {
+                                Text("Buscar")
+                            }
+                        }
+                    }
+                }
+
+                if (
+                    selected.wifiAccessPoints
+                        .isNotEmpty()
+                ) {
+                    item {
+                        Text(
+                            "Roteadores detectados",
+                            fontWeight =
+                                FontWeight.SemiBold
+                        )
+                    }
+
+                    items(
+                        items =
+                            selected
+                                .wifiAccessPoints,
+                        key = {
+                            "wifi-ap:" +
+                                it.bssid.uppercase()
+                        }
+                    ) { ap ->
+                        val selectedTarget =
+                            target?.bssid
+                                ?.equals(
+                                    ap.bssid,
+                                    true
+                                ) == true
+
+                        AppCard {
+                            Row(
+                                modifier =
+                                    Modifier.fillMaxWidth(),
+                                verticalAlignment =
+                                    Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Wifi,
+                                    contentDescription = null,
+                                    tint =
+                                        MaterialTheme
+                                            .colorScheme
+                                            .primary
+                                )
+
+                                Spacer(
+                                    Modifier.size(10.dp)
+                                )
+
+                                Column(
+                                    modifier =
+                                        Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        ap.ssid.ifBlank {
+                                            "<SSID oculto>"
+                                        },
+                                        fontWeight =
+                                            FontWeight.Bold
+                                    )
+
+                                    Text(
+                                        ap.bssid,
+                                        fontFamily =
+                                            FontFamily.Monospace,
+                                        color =
+                                            MaterialTheme
+                                                .colorScheme
+                                                .onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            Spacer(
+                                Modifier.height(8.dp)
+                            )
+
+                            FlowRow(
+                                horizontalArrangement =
+                                    Arrangement.spacedBy(
+                                        6.dp
+                                    ),
+                                verticalArrangement =
+                                    Arrangement.spacedBy(
+                                        4.dp
+                                    )
+                            ) {
+                                AssistChip(
+                                    onClick = {},
+                                    label = {
+                                        Text(
+                                            "CH " +
+                                                ap.channel
+                                        )
+                                    }
+                                )
+
+                                AssistChip(
+                                    onClick = {},
+                                    label = {
+                                        Text(
+                                            ap.rssi
+                                                .toString() +
+                                                " dBm"
+                                        )
+                                    }
+                                )
+
+                                AssistChip(
+                                    onClick = {},
+                                    label = {
+                                        Text(
+                                            ap.securityLabel
+                                        )
+                                    }
+                                )
+                            }
+
+                            Spacer(
+                                Modifier.height(8.dp)
+                            )
+
+                            FilledTonalButton(
+                                onClick = {
+                                    selectWifiTarget(ap)
+                                    channel =
+                                        ap.channel
+                                    error = null
+                                },
+                                modifier =
+                                    Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    if (selectedTarget) {
+                                        "Roteador selecionado"
+                                    } else {
+                                        "Selecionar roteador"
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    AppCard {
+                        Row(
+                            verticalAlignment =
+                                Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Rounded.Visibility,
+                                contentDescription = null,
+                                tint =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .primary
+                            )
+
+                            Spacer(
+                                Modifier.size(10.dp)
+                            )
+
+                            Column {
+                                Text(
+                                    "Monitor Mode",
+                                    fontWeight =
+                                        FontWeight.Bold
+                                )
+
+                                Text(
+                                    "802.11 passivo + EAPOL Analyzer",
+                                    color =
+                                        MaterialTheme
+                                            .colorScheme
+                                            .onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Spacer(
+                            Modifier.height(12.dp)
+                        )
+
+                        if (target != null) {
+                            Text(
+                                target.ssid.ifBlank {
+                                    "<SSID oculto>"
+                                } +
+                                    " • " +
+                                    target.bssid
+                            )
+
+                            Text(
+                                "Canal " +
+                                    target.channel +
+                                    " • " +
+                                    target.rssi +
+                                    " dBm",
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onSurfaceVariant
+                            )
+
+                            Spacer(
+                                Modifier.height(8.dp)
+                            )
+                        } else {
+                            Text(
+                                "Sem roteador selecionado. O hopping pode observar o ambiente sem filtro.",
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onSurfaceVariant
+                            )
+
+                            Spacer(
+                                Modifier.height(8.dp)
+                            )
+                        }
+
+                        FlowRow(
+                            horizontalArrangement =
+                                Arrangement.spacedBy(
+                                    8.dp
+                                )
+                        ) {
+                            AssistChip(
+                                onClick = {
+                                    channel =
+                                        target?.channel
+                                            ?: 1
+                                },
+                                label = {
+                                    Text(
+                                        if (
+                                            target != null
+                                        ) {
+                                            "Canal alvo"
+                                        } else {
+                                            "CH 1"
+                                        }
+                                    )
+                                }
+                            )
+
+                            AssistChip(
+                                onClick = {
+                                    channel = 0
+                                },
+                                label = {
+                                    Text(
+                                        "Hopping 1–11"
+                                    )
+                                }
+                            )
+                        }
+
+                        Spacer(
+                            Modifier.height(8.dp)
+                        )
+
+                        OutlinedTextField(
+                            value =
+                                durationText,
+                            onValueChange = {
+                                durationText =
+                                    it.filter {
+                                        c ->
+                                        c.isDigit()
+                                    }
+                                        .take(3)
+                            },
+                            label = {
+                                Text(
+                                    "Duração • 5–120 s"
+                                )
+                            },
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    keyboardType =
+                                        KeyboardType.Number
+                                ),
+                            singleLine = true,
+                            modifier =
+                                Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(
+                            Modifier.height(8.dp)
+                        )
+
+                        Text(
+                            if (channel == 0) {
+                                "Canal: hopping"
+                            } else {
+                                "Canal: " +
+                                    channel
+                            },
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant
+                        )
+
+                        error?.let {
+                            Spacer(
+                                Modifier.height(8.dp)
+                            )
+
+                            Text(
+                                it,
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .error
+                            )
+                        }
+
+                        Spacer(
+                            Modifier.height(10.dp)
+                        )
+
+                        Row(
+                            horizontalArrangement =
+                                Arrangement.spacedBy(
+                                    8.dp
+                                )
+                        ) {
+                            Button(
+                                onClick = {
+                                    val duration =
+                                        durationText
+                                            .toIntOrNull()
+                                            ?: 0
+
+                                    error =
+                                        startMonitor(
+                                            selected.address,
+                                            channel,
+                                            duration,
+                                            target?.bssid
+                                        )
+                                            .exceptionOrNull()
+                                            ?.message
+                                },
+                                enabled =
+                                    !selected.monitor.active &&
+                                    "MONITOR_V1" in
+                                        selected.capabilities,
+                                modifier =
+                                    Modifier.weight(1f)
+                            ) {
+                                Text("Iniciar")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    stopMonitor(
+                                        selected.address
+                                    )
+                                },
+                                enabled =
+                                    selected.monitor.active,
+                                modifier =
+                                    Modifier.weight(1f)
+                            ) {
+                                Text("Parar")
+                            }
+                        }
+
+                        Spacer(
+                            Modifier.height(8.dp)
+                        )
+
+                        OutlinedButton(
+                            onClick = {
+                                requestMonitorStatus(
+                                    selected.address
+                                )
+                            },
+                            modifier =
+                                Modifier.fillMaxWidth()
+                        ) {
+                            Text("Atualizar métricas")
+                        }
+                    }
+                }
+
+                item {
+                    val monitor =
+                        selected.monitor
+
+                    AppCard {
+                        Text(
+                            "Telemetria do monitor",
+                            fontWeight =
+                                FontWeight.Bold
+                        )
+
+                        Text(
+                            monitor.state +
+                                " • " +
+                                (
+                                    if (
+                                        monitor.hopping
+                                    ) {
+                                        "hopping"
+                                    } else {
+                                        "CH " +
+                                            monitor.channel
+                                    }
+                                ),
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant
+                        )
+
+                        Spacer(
+                            Modifier.height(10.dp)
+                        )
+
+                        FlowRow(
+                            horizontalArrangement =
+                                Arrangement.spacedBy(
+                                    6.dp
+                                ),
+                            verticalArrangement =
+                                Arrangement.spacedBy(
+                                    4.dp
+                                )
+                        ) {
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        "Frames " +
+                                            monitor.frames
+                                    )
+                                }
+                            )
+
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        "FPS " +
+                                            monitor.fps
+                                    )
+                                }
+                            )
+
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        "RSSI " +
+                                            (
+                                                monitor
+                                                    .rssiAvg
+                                                    ?.toString()
+                                                    ?: "—"
+                                            ) +
+                                            " dBm"
+                                    )
+                                }
+                            )
+
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        "MGMT " +
+                                            monitor.management
+                                    )
+                                }
+                            )
+
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        "CTRL " +
+                                            monitor.control
+                                    )
+                                }
+                            )
+
+                            AssistChip(
+                                onClick = {},
+                                label = {
+                                    Text(
+                                        "DATA " +
+                                            monitor.data
+                                    )
+                                }
+                            )
+                        }
+
+                        Spacer(
+                            Modifier.height(12.dp)
+                        )
+
+                        Text(
+                            "Management",
+                            fontWeight =
+                                FontWeight.SemiBold
+                        )
+
+                        Text(
+                            "Beacon " +
+                                monitor.beacon +
+                                " • Probe Req " +
+                                monitor.probeRequest +
+                                " • Probe Resp " +
+                                monitor.probeResponse
+                        )
+
+                        Text(
+                            "Auth " +
+                                monitor.auth +
+                                " • Assoc " +
+                                monitor.assoc +
+                                " • Reassoc " +
+                                monitor.reassoc
+                        )
+
+                        Text(
+                            "Deauth observado " +
+                                monitor.deauthSeen +
+                                " • Disassoc observado " +
+                                monitor.disassocSeen
+                        )
+
+                        Spacer(
+                            Modifier.height(12.dp)
+                        )
+
+                        Text(
+                            "EAPOL / 4-way handshake",
+                            fontWeight =
+                                FontWeight.SemiBold
+                        )
+
+                        Text(
+                            "EAPOL " +
+                                monitor.eapol +
+                                " • M1 " +
+                                monitor.m1 +
+                                " • M2 " +
+                                monitor.m2 +
+                                " • M3 " +
+                                monitor.m3 +
+                                " • M4 " +
+                                monitor.m4
+                        )
+
+                        if (
+                            monitor.m1 > 0 &&
+                            monitor.m2 > 0 &&
+                            monitor.m3 > 0 &&
+                            monitor.m4 > 0
+                        ) {
+                            Spacer(
+                                Modifier.height(6.dp)
+                            )
+
+                            Text(
+                                "4-way handshake completo observado.",
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .primary,
+                                fontWeight =
+                                    FontWeight.SemiBold
+                            )
+                        }
+
+                        monitor.reason
+                            ?.takeIf {
+                                it.isNotBlank()
+                            }
+                            ?.let {
+                                reason ->
+                                Spacer(
+                                    Modifier.height(8.dp)
+                                )
+
+                                Text(
+                                    "Fim: " +
+                                        reason,
+                                    color =
+                                        MaterialTheme
+                                            .colorScheme
+                                            .onSurfaceVariant
+                                )
+                            }
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(
+                Modifier.height(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun LabScreen(
     state: AppState,
     selectNode: (String) -> Unit,
