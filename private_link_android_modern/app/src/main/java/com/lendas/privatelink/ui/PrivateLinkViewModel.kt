@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -744,43 +745,54 @@ class PrivateLinkViewModel(application: Application) :
         address: String,
         transform: (NodeState) -> NodeState
     ) {
-        val current =
-            _state.value.nodes
+        _state.update { ui ->
+            val existing =
+                ui.nodes.firstOrNull {
+                    it.address.equals(
+                        address,
+                        ignoreCase = true
+                    )
+                }
+                    ?: NodeState(
+                        address = address
+                    )
 
-        val index =
-            current.indexOfFirst {
-                it.address == address
-            }
+            val updated =
+                transform(existing)
+                    .copy(
+                        address = address
+                    )
 
-        val base =
-            if (index >= 0) {
-                current[index]
-            } else {
-                NodeState(address = address)
-            }
-
-        val updated =
-            transform(base)
-
-        val nodes =
-            current.toMutableList()
-
-        if (index >= 0) {
-            nodes[index] = updated
-        } else {
-            nodes.add(updated)
-        }
-
-        _state.value =
-            _state.value.copy(
-                nodes = nodes.sortedWith(
-                    compareByDescending<NodeState> {
-                        it.authenticated
-                    }.thenBy {
-                        it.displayName
+            val deduplicated =
+                buildList {
+                    ui.nodes.forEach { node ->
+                        if (
+                            !node.address.equals(
+                                address,
+                                ignoreCase = true
+                            )
+                        ) {
+                            add(node)
+                        }
                     }
-                )
+
+                    add(updated)
+                }
+                    .distinctBy {
+                        it.address.uppercase()
+                    }
+                    .sortedWith(
+                        compareByDescending<NodeState> {
+                            it.authenticated
+                        }.thenBy {
+                            it.displayName
+                        }
+                    )
+
+            ui.copy(
+                nodes = deduplicated
             )
+        }
     }
 
     private fun nodeByAddress(
@@ -1002,13 +1014,29 @@ class PrivateLinkViewModel(application: Application) :
         ) {
             val connectedAddresses =
                 sessions.keys
-
-            _state.value =
-                _state.value.copy(
-                    devices = devices.filterNot {
-                        it.address in connectedAddresses
+                    .map {
+                        it.uppercase()
                     }
+                    .toSet()
+
+            val uniqueDevices =
+                devices
+                    .filterNot {
+                        it.address.uppercase() in
+                            connectedAddresses
+                    }
+                    .distinctBy {
+                        it.address.uppercase()
+                    }
+                    .sortedByDescending {
+                        it.rssi
+                    }
+
+            _state.update { ui ->
+                ui.copy(
+                    devices = uniqueDevices
                 )
+            }
         }
 
         override fun onLog(message: String) {
