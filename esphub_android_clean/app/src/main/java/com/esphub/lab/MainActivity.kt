@@ -33,6 +33,8 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.StopCircle
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -81,6 +83,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val title: String) {
     Nodes("Nós"),
+    WiFi("Wi-Fi"),
     Lab("Lab"),
     Console("Console")
 }
@@ -145,6 +148,11 @@ private fun ESPhubApp(
         stopLab = vm::stopLab,
         stopAllLabs = vm::stopAllLabs,
         requestLabStatus = vm::requestLabStatus,
+        requestWifiScan = vm::requestWifiScan,
+        selectWifiTarget = vm::selectWifiTarget,
+        startMonitor = vm::startMonitor,
+        stopMonitor = vm::stopMonitor,
+        requestMonitorStatus = vm::requestMonitorStatus,
         clearLogs = vm::clearLogs,
         clearMasterKey = vm::clearMasterKey
     )
@@ -289,6 +297,11 @@ private fun MainScreen(
     stopLab: (String) -> Unit,
     stopAllLabs: () -> Unit,
     requestLabStatus: (String) -> Unit,
+    requestWifiScan: (String) -> Result<Unit>,
+    selectWifiTarget: (WifiAccessPoint) -> Unit,
+    startMonitor: (String, Int, Int, String?) -> Result<Unit>,
+    stopMonitor: (String) -> Unit,
+    requestMonitorStatus: (String) -> Unit,
     clearLogs: () -> Unit,
     clearMasterKey: () -> Unit
 ) {
@@ -339,7 +352,7 @@ private fun MainScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Lab Controller 1.0.1",
+                        "Wireless Lab 1.1.0",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -364,6 +377,7 @@ private fun MainScreen(
                             Icon(
                                 when (item) {
                                     AppTab.Nodes -> Icons.Rounded.Bluetooth
+                                    AppTab.WiFi -> Icons.Rounded.Wifi
                                     AppTab.Lab -> Icons.Rounded.Science
                                     AppTab.Console -> Icons.Rounded.Code
                                 },
@@ -388,6 +402,18 @@ private fun MainScreen(
                     connect = connect,
                     disconnect = disconnect,
                     selectNode = selectNode,
+                    modifier = Modifier.padding(padding)
+                )
+
+            AppTab.WiFi ->
+                WirelessScreen(
+                    state = state,
+                    selectNode = selectNode,
+                    requestWifiScan = requestWifiScan,
+                    selectWifiTarget = selectWifiTarget,
+                    startMonitor = startMonitor,
+                    stopMonitor = stopMonitor,
+                    requestMonitorStatus = requestMonitorStatus,
                     modifier = Modifier.padding(padding)
                 )
 
@@ -635,7 +661,15 @@ private fun LabScreen(
     requestLabStatus: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var ssid by remember { mutableStateOf("") }
+    var ssid by remember(
+        state.selectedWifiTarget?.bssid
+    ) {
+        mutableStateOf(
+            state.selectedWifiTarget
+                ?.ssid
+                .orEmpty()
+        )
+    }
     var password by remember { mutableStateOf("") }
     var target by remember { mutableStateOf("") }
     var durationText by remember { mutableStateOf("20") }
