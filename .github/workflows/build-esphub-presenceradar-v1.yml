@@ -65,6 +65,9 @@ jobs:
           cat esphub-presenceradar/source.part*.b64 | tr -d '\n' | base64 -d > /tmp/presenceradar.tar.xz
           echo '8aab3f6275c5f2fb99d008ff83d8cd5c52b9bfc84c20cd02140d74c2631a6466  /tmp/presenceradar.tar.xz' | sha256sum -c -
           tar -xJf /tmp/presenceradar.tar.xz -C .
+          mkdir -p android/app/src/main/java/com/esphub/app/protocol
+          cp esphub-presenceradar/android-protocol/*.kt android/app/src/main/java/com/esphub/app/protocol/
+          test "$(find android/app/src/main/java/com/esphub/app/protocol -name '*.kt' | wc -l)" -eq 3
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
