@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 from serial.tools import list_ports
 
 APP_NAME = "ESPhub MultiFlasher"
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.1.0"
 
 SUPPORTED_CHIPS = {
     "ESP32": {
@@ -35,35 +35,35 @@ SUPPORTED_CHIPS = {
 }
 
 KNOWN_FIRMWARE = {
-    "ESPhub_S3_v1_5_0_FULL.bin": {
+    "ESPhub_S3_v1_6_0_FULL.bin": {
         "chip": "ESP32-S3",
         "kind": "FULL",
-        "sha256": "fe6269e5dc45456f23b138fba27eb7d5a5fc6b26fa87582bbdf8e245497cb58e",
+        "sha256": "7469a277563e89628aad8cbe2e50d25e439882422585643c7d8bc359707c7854",
     },
-    "ESPhub_S3_v1_5_0_OTA.bin": {
+    "ESPhub_S3_v1_6_0_OTA.bin": {
         "chip": "ESP32-S3",
         "kind": "APP",
-        "sha256": "dc3fe39b78902dba0d7b503952711a647bbd10d4a4fd24c1a7df3fe3d875a730",
+        "sha256": "653ec05829b3e199b7f672d3d9dd87cf68fad7174fd69948e5864d5e520a3bd7",
     },
-    "ESPhub_C6_v1_1_0_FULL.bin": {
+    "ESPhub_C6_v1_2_0_FULL.bin": {
         "chip": "ESP32-C6",
         "kind": "FULL",
-        "sha256": "332dac55ad5a4ac17f1d8ca24acfe7d0cd893437fd65ae5099bed296464ec880",
+        "sha256": "5ac490ac27abe082eddd6d11d03622637eae9c03482651df69dc6edb7cf50e05",
     },
-    "ESPhub_C6_v1_1_0_OTA.bin": {
+    "ESPhub_C6_v1_2_0_OTA.bin": {
         "chip": "ESP32-C6",
         "kind": "APP",
-        "sha256": "99a1f0f401b2cb0cefb22d042036e4e29a14fcac5029e451dbca42757352f85b",
+        "sha256": "85a167d01ec17df8409d236a4b10bb3f7ccfe7ed74b6477a0d7fb95a13dc8173",
     },
-    "ESPhub_ESP32_v1_0_0_FULL.bin": {
+    "ESPhub_ESP32_v1_1_0_FULL.bin": {
         "chip": "ESP32",
         "kind": "FULL",
-        "sha256": "d72731338192f3489f1c310f5f9d117292a95c838eaba6d585f40958b723b7f6",
+        "sha256": "825ca135c924689b995b1f71fccb3e8b0f4a7ff343de9a3aaeef287256df7d64",
     },
-    "ESPhub_ESP32_v1_0_0_OTA.bin": {
+    "ESPhub_ESP32_v1_1_0_OTA.bin": {
         "chip": "ESP32",
         "kind": "APP",
-        "sha256": "3f76d6301363244c9a51ac4cd72620e42c92c30f78d4805f501e91ecf52ab185",
+        "sha256": "e3c088be4fd2cf6447df75b60b56c96c76707c8856e584594b8292979aed4956",
     },
 }
 
