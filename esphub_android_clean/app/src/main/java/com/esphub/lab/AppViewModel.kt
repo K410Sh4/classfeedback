@@ -275,6 +275,146 @@ class AppViewModel(
         )
     }
 
+    fun requestWifiScan(
+        address: String
+    ): Result<Unit> =
+        runCatching {
+            val key =
+                normalize(address)
+
+            val node =
+                _state.value
+                    .nodes[key]
+                    ?: error(
+                        "Nó não encontrado."
+                    )
+
+            require(
+                node.authenticated
+            ) {
+                "Autentique o nó antes do scan Wi-Fi."
+            }
+
+            require(
+                "WIFI_SCAN_V1" in
+                    node.capabilities
+            ) {
+                "O firmware deste nó não anuncia WIFI_SCAN_V1."
+            }
+
+            ble.requestWifiScan(key)
+
+            addLog(
+                "Scan Wi-Fi solicitado em " +
+                    node.displayName +
+                    "."
+            )
+        }
+
+    fun startMonitor(
+        address: String,
+        channel: Int,
+        durationSeconds: Int,
+        bssid: String?
+    ): Result<Unit> =
+        runCatching {
+            val key =
+                normalize(address)
+
+            val node =
+                _state.value
+                    .nodes[key]
+                    ?: error(
+                        "Nó não encontrado."
+                    )
+
+            require(
+                node.authenticated
+            ) {
+                "Autentique o nó antes do monitor."
+            }
+
+            require(
+                "MONITOR_V1" in
+                    node.capabilities
+            ) {
+                "O firmware deste nó não anuncia MONITOR_V1."
+            }
+
+            require(
+                channel in 0..11
+            ) {
+                "Canal deve ser 0 (hopping) ou 1–11."
+            }
+
+            require(
+                durationSeconds in
+                    5..120
+            ) {
+                "Duração permitida: 5–120 segundos."
+            }
+
+            val normalizedBssid =
+                bssid
+                    ?.trim()
+                    ?.takeIf {
+                        it.isNotEmpty()
+                    }
+
+            if (
+                normalizedBssid != null
+            ) {
+                require(
+                    Regex(
+                        "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$"
+                    ).matches(
+                        normalizedBssid
+                    )
+                ) {
+                    "BSSID inválido."
+                }
+            }
+
+            ble.startMonitor(
+                address = key,
+                channel = channel,
+                durationSeconds =
+                    durationSeconds,
+                bssid =
+                    normalizedBssid
+            )
+
+            addLog(
+                "Monitor solicitado em " +
+                    node.displayName +
+                    " • canal " +
+                    (
+                        if (channel == 0) {
+                            "hopping"
+                        } else {
+                            channel.toString()
+                        }
+                    ) +
+                    " • " +
+                    durationSeconds +
+                    "s."
+            )
+        }
+
+    fun stopMonitor(
+        address: String
+    ) {
+        ble.stopMonitor(address)
+    }
+
+    fun requestMonitorStatus(
+        address: String
+    ) {
+        ble.requestMonitorStatus(
+            address
+        )
+    }
+
     fun clearLogs() {
         _state.update {
             it.copy(
