@@ -339,7 +339,7 @@ private fun MainScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Lab Controller 1.0.0",
+                        "Lab Controller 1.0.1",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
