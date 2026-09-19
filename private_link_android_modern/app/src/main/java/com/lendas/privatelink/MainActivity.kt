@@ -727,8 +727,10 @@ private fun HomeScreen(
             }
 
             items(
-                state.nodes,
-                key = { it.address }
+                state.nodes.distinctBy {
+                    it.address.uppercase()
+                },
+                key = { it.address.uppercase() }
             ) { node ->
                 NodeSummaryCard(
                     node = node,
@@ -875,8 +877,10 @@ private fun NodesScreen(
             }
 
             items(
-                state.devices,
-                key = { it.address }
+                state.devices.distinctBy {
+                    it.address.uppercase()
+                },
+                key = { it.address.uppercase() }
             ) { device ->
                 ModernCard {
                     Row(
@@ -1119,8 +1123,10 @@ private fun ResearchScreen(
         }
 
         items(
-            researchNodes,
-            key = { it.address }
+            researchNodes.distinctBy {
+                it.address.uppercase()
+            },
+            key = { it.address.uppercase() }
         ) { node ->
             ResearchNodeCard(
                 node = node,
