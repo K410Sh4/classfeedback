@@ -305,13 +305,9 @@ class AppViewModel(
     override fun onDiscovered(
         nodes: List<DiscoveredNode>
     ) {
-        val connected =
+        val knownSessionAddresses =
             _state.value
                 .nodes
-                .filterValues {
-                    it.phase !=
-                        SessionPhase.Idle
-                }
                 .keys
 
         val unique =
@@ -324,7 +320,7 @@ class AppViewModel(
                 .filterNot {
                     normalize(
                         it.address
-                    ) in connected
+                    ) in knownSessionAddresses
                 }
 
         _state.update {
