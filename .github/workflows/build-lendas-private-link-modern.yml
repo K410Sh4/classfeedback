@@ -1,4 +1,4 @@
-name: Build ESPhub APK 2.5.0 LabTest V1
+name: Build ESPhub APK 2.5.1 Duplicate-Key Fix
 
 on:
   push:
@@ -43,15 +43,15 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp private_link_android_modern/app/build/outputs/apk/release/app-release.apk ESPhub_2_5_0.apk
-          sha256sum ESPhub_2_5_0.apk | tee ESPhub_2_5_0.sha256
+          cp private_link_android_modern/app/build/outputs/apk/release/app-release.apk ESPhub_2_5_1.apk
+          sha256sum ESPhub_2_5_1.apk | tee ESPhub_2_5_1.sha256
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ESPhub_2_5_0_APK
+          name: ESPhub_2_5_1_APK
           path: |
-            ESPhub_2_5_0.apk
-            ESPhub_2_5_0.sha256
+            ESPhub_2_5_1.apk
+            ESPhub_2_5_1.sha256
           if-no-files-found: error
           retention-days: 7
