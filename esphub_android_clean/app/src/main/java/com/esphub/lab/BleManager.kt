@@ -31,6 +31,10 @@ class BleManager(
     private val masterKeyProvider: () -> ByteArray?,
     private val listener: Listener
 ) {
+    private data class WriteTask(
+        val payload: ByteArray,
+        var attempts: Int = 0
+    )
     interface Listener {
         fun onScanning(scanning: Boolean)
         fun onDiscovered(nodes: List<DiscoveredNode>)
@@ -332,11 +336,6 @@ class BleManager(
         private val device: BluetoothDevice,
         initialAddress: String
     ) {
-        private data class WriteTask(
-            val payload: ByteArray,
-            var attempts: Int = 0
-        )
-
         private var state =
             NodeState(
                 address =
