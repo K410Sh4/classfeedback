@@ -37,6 +37,9 @@ jobs:
           sed -i '/dump_ack_en = false;/d' firmware/src/presence_radar.cpp
           sed -i '/^board_upload.flash_size = 16MB$/a board_build.flash_size = 16MB' firmware/platformio.ini
           grep -q '^board_build.flash_size = 16MB$' firmware/platformio.ini
+          cp esphub-presenceradar/patches/partitions_4MB_c6.csv firmware/partitions_4MB_c6.csv
+          sed -i '/^board = esp32-c6-devkitm-1$/a board_build.partitions = partitions_4MB_c6.csv' firmware/platformio.ini
+          grep -q '^board_build.partitions = partitions_4MB_c6.csv$' firmware/platformio.ini
       - name: Compile S3 C6 DevKit and generate FULL images
         run: python scripts/build_firmware.py
       - name: SHA-256 manifests
