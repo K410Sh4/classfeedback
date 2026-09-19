@@ -8,6 +8,7 @@
 #include <esp_wifi.h>
 #include "BoardConfig.h"
 #include "LabTest.h"
+#include "WirelessTools.h"
 
 #define BLE_PASSKEY 496110
 
@@ -2016,6 +2017,120 @@ static void processControl(
         return;
     }
 
+    if (message == "WIFI_SCAN") {
+        if (
+            gOtaActive ||
+            gFastOtaActive ||
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
+        ) {
+            notifyText(
+                "WIFI_SCAN_ERROR|reason=busy"
+            );
+            return;
+        }
+
+        String error;
+
+        const bool ok =
+            WirelessTools::requestScan(
+                error
+            );
+
+        if (!ok) {
+            notifyText(
+                "WIFI_SCAN_ERROR|reason=" +
+                error
+            );
+        }
+
+        return;
+    }
+
+    if (
+        message.startsWith(
+            "MONITOR_START|"
+        )
+    ) {
+        if (
+            gOtaActive ||
+            gFastOtaActive ||
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
+        ) {
+            notifyText(
+                "MONITOR_ERROR|reason=busy"
+            );
+            return;
+        }
+
+        const uint8_t channel =
+            static_cast<uint8_t>(
+                strtoul(
+                    fieldAt(
+                        message,
+                        '|',
+                        1
+                    ).c_str(),
+                    nullptr,
+                    10
+                )
+            );
+
+        const uint32_t durationSeconds =
+            static_cast<uint32_t>(
+                strtoul(
+                    fieldAt(
+                        message,
+                        '|',
+                        2
+                    ).c_str(),
+                    nullptr,
+                    10
+                )
+            );
+
+        const String bssid =
+            fieldAt(
+                message,
+                '|',
+                3
+            );
+
+        String error;
+
+        const bool ok =
+            WirelessTools::startMonitor(
+                channel,
+                durationSeconds,
+                bssid,
+                error
+            );
+
+        if (!ok) {
+            notifyText(
+                "MONITOR_ERROR|reason=" +
+                error
+            );
+        }
+
+        return;
+    }
+
+    if (message == "MONITOR_STOP") {
+        WirelessTools::stopMonitor(
+            "app_stop"
+        );
+        return;
+    }
+
+    if (message == "MONITOR_STATUS") {
+        notifyText(
+            WirelessTools::statusText()
+        );
+        return;
+    }
+
     if (message == "REBOOT") {
         notifyText("OK|reboot");
         delay(300);
@@ -2031,7 +2146,8 @@ static void processControl(
         if (
             gOtaActive ||
             gFastOtaActive ||
-            LabTest::isBusy()
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
         ) {
             notifyText(
                 "LAB_ERROR|reason=busy"
@@ -2076,7 +2192,8 @@ static void processControl(
         if (
             gOtaActive ||
             gFastOtaActive ||
-            LabTest::isBusy()
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
         ) {
             notifyText(
                 "LAB_ERROR|reason=busy"
@@ -2159,7 +2276,8 @@ static void processControl(
     ) {
         if (
             gOtaActive ||
-            gFastOtaActive
+            gFastOtaActive ||
+            WirelessTools::isBusy()
         ) {
             notifyText(
                 "LAB_ERROR|reason=busy"
@@ -2211,9 +2329,12 @@ static void processControl(
         message ==
         "FAST_OTA_BEGIN"
     ) {
-        if (LabTest::isBusy()) {
+        if (
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
+        ) {
             notifyText(
-                "FAST_OTA_ERROR|lab_active"
+                "FAST_OTA_ERROR|wireless_busy"
             );
             return;
         }
@@ -2240,9 +2361,12 @@ static void processControl(
             "OTA_BEGIN|"
         )
     ) {
-        if (LabTest::isBusy()) {
+        if (
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
+        ) {
             notifyText(
-                "OTA_ERROR|lab_active"
+                "OTA_ERROR|wireless_busy"
             );
             return;
         }
@@ -2421,6 +2545,12 @@ class ServerCallbacks :
             );
         }
 
+        if (WirelessTools::isMonitoring()) {
+            WirelessTools::stopMonitor(
+                "control_lost"
+            );
+        }
+
         gNextResearchAt =
             millis() +
             RESEARCH_IDLE_DELAY_MS;
@@ -2459,7 +2589,7 @@ void setup() {
             PROVISION_WINDOW_MS;
     }
 
-    NimBLEDevice::init("");
+    NimBLEDevice::init(PL_BLE_NAME);
 
     NimBLEDevice::setSecurityAuth(
         true,
@@ -2547,7 +2677,7 @@ void setup() {
 
     Serial.println();
     Serial.println(
-        "ESPhub Multi-Node + LabTest V1"
+        "ESPhub Multi-Node + Wireless Tools V1"
     );
 
     Serial.println(
@@ -2618,6 +2748,7 @@ void setup() {
 void loop() {
     serviceFastOta();
     LabTest::service();
+    WirelessTools::service();
 
     String labNotification;
 
@@ -2631,6 +2762,18 @@ void loop() {
         );
     }
 
+    String wirelessNotification;
+
+    if (
+        WirelessTools::pollNotification(
+            wirelessNotification
+        )
+    ) {
+        notifyText(
+            wirelessNotification
+        );
+    }
+
     uint32_t now = millis();
 
     if (
@@ -2638,6 +2781,7 @@ void loop() {
         !gOtaActive &&
         !gFastOtaActive &&
         !LabTest::isBusy() &&
+        !WirelessTools::isBusy() &&
         static_cast<int32_t>(
             now -
             gNextResearchAt
