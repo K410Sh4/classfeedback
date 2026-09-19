@@ -266,6 +266,64 @@ static void notifyText(const String& text) {
     gResponse->notify();
 }
 
+static void runBleSurveyNow() {
+    if (
+        gOtaActive ||
+        gFastOtaActive ||
+        LabTest::isBusy() ||
+        WirelessTools::isBusy()
+    ) {
+        notifyText(
+            "BLE_SURVEY_ERROR|reason=busy"
+        );
+        return;
+    }
+
+    NimBLEScan* scan =
+        NimBLEDevice::getScan();
+
+    scan->stop();
+    scan->clearResults();
+    scan->setActiveScan(false);
+    scan->setInterval(120);
+    scan->setWindow(55);
+    scan->setMaxResults(48);
+
+    NimBLEScanResults results =
+        scan->getResults(
+            1500,
+            false
+        );
+
+    int bestRssi = -127;
+
+    for (
+        int index = 0;
+        index < results.getCount();
+        ++index
+    ) {
+        const NimBLEAdvertisedDevice* device =
+            results.getDevice(index);
+
+        if (
+            device != nullptr &&
+            device->getRSSI() > bestRssi
+        ) {
+            bestRssi =
+                device->getRSSI();
+        }
+    }
+
+    notifyText(
+        "BLE_SURVEY|count=" +
+        String(results.getCount()) +
+        "|best_rssi=" +
+        String(bestRssi)
+    );
+
+    scan->clearResults();
+}
+
 static void hmacSha256WithKey(
     const uint8_t key[32],
     const uint8_t* data,
@@ -2539,7 +2597,10 @@ class ServerCallbacks :
             gOtaReceived = 0;
         }
 
-        if (LabTest::isBusy()) {
+        if (
+            LabTest::isBusy() ||
+            WirelessTools::isBusy()
+        ) {
             LabTest::stop(
                 "control_lost"
             );
